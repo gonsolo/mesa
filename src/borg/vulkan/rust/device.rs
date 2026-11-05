@@ -252,6 +252,7 @@ entrypoint! {
             CmdBindIndexBuffer, CmdDispatch, CmdDispatchIndirect, CmdDrawIndirect, CmdDrawIndexedIndirect, CmdBeginQuery,
             CmdEndQuery, CmdResetQueryPool, CmdCopyQueryPoolResults
         );
+        crate::record::install(&mut rec);
         let mut dt: vk_device_dispatch_table = std::mem::zeroed();
         vk_device_dispatch_table_from_entrypoints(&mut dt, &rec, true);
         vk_device_dispatch_table_from_entrypoints(&mut dt, &borgvk_device_entrypoints, false);

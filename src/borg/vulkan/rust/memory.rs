@@ -44,6 +44,20 @@ unsafe impl Zeroed for DeviceMemory {}
 unsafe impl Zeroed for Buffer {}
 unsafe impl Zeroed for BufferView {}
 
+thread_local! {
+    static TOUCHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a `Host` read or wrote memory since the last call: a pass that does so while
+/// recording builds at submit.
+pub fn touched() -> bool {
+    TOUCHED.replace(false)
+}
+
+fn touch() {
+    TOUCHED.set(true);
+}
+
 /// The host-visible bytes of a resource: its mapping from the binding offset on. Accesses are
 /// checked against the mapping, so a copy between two of them, even of the same memory, is safe.
 #[derive(Clone, Copy)]
@@ -82,12 +96,14 @@ impl<'a> Host<'a> {
 
     pub fn read(&self, off: usize, dst: &mut [u8]) -> bool {
         let Some(p) = self.ptr(off, dst.len()) else { return false };
+        touch();
         unsafe { std::ptr::copy(p, dst.as_mut_ptr(), dst.len()) };
         true
     }
 
     pub fn write(&self, off: usize, src: &[u8]) -> bool {
         let Some(p) = self.ptr(off, src.len()) else { return false };
+        touch();
         unsafe { std::ptr::copy(src.as_ptr(), p, src.len()) };
         true
     }
@@ -95,6 +111,7 @@ impl<'a> Host<'a> {
     /// Writes `pattern` `count` times from `off` on.
     pub fn fill(&self, off: usize, pattern: &[u8], count: usize) -> bool {
         let Some(p) = self.ptr(off, pattern.len().saturating_mul(count)) else { return false };
+        touch();
         for i in 0..count {
             unsafe { std::ptr::copy_nonoverlapping(pattern.as_ptr(), p.add(i * pattern.len()), pattern.len()) };
         }
@@ -104,12 +121,14 @@ impl<'a> Host<'a> {
     /// Runs `f` on the `n` bytes at `off`, which nothing writes meanwhile.
     pub fn with_bytes<R>(&self, off: usize, n: usize, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
         let p = self.ptr(off, n)?;
+        touch();
         Some(f(unsafe { std::slice::from_raw_parts(p, n) }))
     }
 
     /// Copies `n` bytes at `from` to `to` at `at`; the ranges may overlap.
     pub fn copy(&self, from: usize, to: &Host<'_>, at: usize, n: usize) -> bool {
         let (Some(s), Some(d)) = (self.ptr(from, n), to.ptr(at, n)) else { return false };
+        touch();
         unsafe { std::ptr::copy(s, d, n) };
         true
     }
