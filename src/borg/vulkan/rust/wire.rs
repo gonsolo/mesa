@@ -4,13 +4,12 @@
 //! The commands a recorded draw sends the list builder, and the state words they carry.
 
 use crate::ffi::*;
-use crate::list::Cmd;
+use crate::list::{Cmd, PUSH_MAX_WORDS};
 use crate::vk::*;
 use crate::transport::capturing;
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
 
 const SHADER_MAX: usize = BORGVK_SHADER_BLOB_MAX as usize;
-const PUSH_MAX_WORDS: u32 = 32;
 const TEXG_CHUNK: usize = BORGVK_TEXG_CHUNK as usize;
 
 fn emit(c: Cmd) {

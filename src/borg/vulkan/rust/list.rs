@@ -36,6 +36,9 @@ const TEXEL_BYTES: u32 = 0x60_0000;
 const SHIFT_MIN: u32 = 8;
 const SHIFT_MAX: u32 = 10;
 const LIST_MAX_REGS: usize = 40;
+const TEX_SLOTS: u32 = 32;
+const MEM_DATA: u32 = 256;
+pub const PUSH_MAX_WORDS: u32 = 32;
 
 /// What the driver records for the list builder.
 #[derive(Clone, PartialEq, Debug)]
@@ -239,7 +242,7 @@ impl Builder {
             ms: 0,
             srgb: 0,
             flush_format: 0,
-            tex_desc: vec![[0; 16]; BC_TEX_SLOTS as usize],
+            tex_desc: vec![[0; 16]; TEX_SLOTS as usize],
             tex_slot: 0,
             samp_slot: 0,
             tex_base: 0,
@@ -561,7 +564,7 @@ impl Builder {
             }
             Cmd::Push(off, words) => {
                 let (off, nw) = (*off, words.len() as u32);
-                if nw < 1 || nw > BC_PUSH_MAX_WORDS || off >= BC_PUSH_MAX_WORDS || nw > BC_PUSH_MAX_WORDS - off {
+                if nw < 1 || nw > PUSH_MAX_WORDS || off >= PUSH_MAX_WORDS || nw > PUSH_MAX_WORDS - off {
                     return false;
                 }
                 let nw = nw.min(BORG_PUSH_CONST_MAX_WORDS - off);
@@ -658,7 +661,7 @@ impl Builder {
             }
             Cmd::Mem(off, data) => {
                 let (off, nb) = (*off, data.len() as u32);
-                if nb > BC_MEM_DATA || off & 3 != 0 || off + nb > BORG_HEAP_BYTES {
+                if nb > MEM_DATA || off & 3 != 0 || off + nb > BORG_HEAP_BYTES {
                     return false;
                 }
                 for i in (0..nb).step_by(4) {
@@ -709,14 +712,14 @@ impl Builder {
             }
             Cmd::TexLevels(l) => self.tex_lvl = *l,
             &Cmd::TexSlot(t, s, base) => {
-                if t as u32 >= BC_TEX_SLOTS || s as u32 >= BC_TEX_SLOTS || base & 255 != 0 || base >= TEXEL_BYTES {
+                if t as u32 >= TEX_SLOTS || s as u32 >= TEX_SLOTS || base & 255 != 0 || base >= TEXEL_BYTES {
                     return false;
                 }
                 (self.tex_slot, self.samp_slot, self.tex_base) = (t as u32, s as u32, base);
             }
             Cmd::TexChunk(off, data, d3, samp) => {
                 let (off, nb) = (*off, data.len() as u32);
-                if nb > BC_TEXG_DATA || off & 3 != 0 || self.tex_base + off + nb > TEXEL_BYTES {
+                if nb > BORGVK_TEXG_CHUNK || off & 3 != 0 || self.tex_base + off + nb > TEXEL_BYTES {
                     return false;
                 }
                 if (d3[1] >> 10) & 15 == 0 {
