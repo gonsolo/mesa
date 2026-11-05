@@ -127,7 +127,7 @@ impl Server {
         }
         (self.fb, self.zb, self.sb, self.heap) = (DRAM_OUT_BASE_SPI, BORG_ZB_SPI, BORG_SB_SPI, BORG_HEAP_SPI);
         for a in 1..4u32 {
-            self.att[a as usize] = 0x4A0_0000 + (a - 1) * 0x100_0000; // BORG_ATT_SPI(a)
+            self.att[a as usize] = BORG_ATT_SPI + (a - 1) * BORG_ATT_STRIDE;
         }
         (self.w, self.h) = (w, h);
         true

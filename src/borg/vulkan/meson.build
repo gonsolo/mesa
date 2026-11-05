@@ -15,9 +15,8 @@ borgvk_entrypoints = custom_target(
 
 libborgvk_files = []
 
-# The SPIR-B parser of software/borg, host build; its headers give the packet and memory layout.
+# The Borg repo's generated headers: registers and memory layout (make rdl).
 borg_sw_inc = include_directories(
-  '../../../../software/borg',
   '../../../../out/hardware/borg/rdl',
   '../../../include/drm-uapi',
 )
@@ -42,7 +41,7 @@ borgvk_deps = [
 
 borgvk_inc = [
   inc_include, inc_src, inc_util,
-  include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
+  include_directories('../../../../'),   # Borg repo root → out/hardware/borg/rdl
   include_directories('../compiler'),
 ]
 
@@ -83,8 +82,7 @@ _borgvk_bindings_rs = rust.bindgen(
   input : ['rust/bindings.h', borgvk_entrypoints[0], borgvk_rust_h],
   output : 'borgvk_bindings.rs',
   output_inline_wrapper : 'borgvk_inline_wrappers.c',
-  # The host build of software/borg, as libborg_host is: its structs and limits.
-  c_args : [pre_args, borgvk_bindgen_c_args, '-DBORG_HOST'],
+  c_args : [pre_args, borgvk_bindgen_c_args],
   args : [
     bindgen_output_args, borgvk_bindgen_args, '--no-prepend-enum-name', '--with-derive-default',
     '--allowlist-type', 'vk_device|vk_device_dispatch_table|borg_blend|vk_descriptor_set_layout|list_head|vk_pipeline_layout|VkFormat|pipe_format',

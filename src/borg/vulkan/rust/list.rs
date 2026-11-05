@@ -546,7 +546,7 @@ impl Builder {
         if self.natt > 1 {
             g.reg(r!(att_format), self.att_fmt);
             for (k, reg) in [r!(att_base1), r!(att_base2), r!(att_base3)].into_iter().enumerate() {
-                let a = if self.place[3 + k] != 0 { self.place[3 + k] } else { 0x4A0_0000 + k as u32 * 0x100_0000 };
+                let a = if self.place[3 + k] != 0 { self.place[3 + k] } else { BORG_ATT_SPI + k as u32 * BORG_ATT_STRIDE };
                 g.reg(reg, a);
             }
         }
