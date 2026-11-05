@@ -130,6 +130,29 @@ fn record_shift(num_varyings: u32) -> Option<u32> {
     (SHIFT_MIN..=SHIFT_MAX).find(|&s| bytes <= 1 << s)
 }
 
+/// A SPIR-B blob's draw extension (docs/spirb.md): the varying components a vertex shader writes
+/// and its constant window, u-index and word.
+struct DrawExt {
+    varyings: u32,
+    window: Vec<(u32, u32)>,
+}
+
+/// None without the extension or for a malformed blob.
+fn draw_ext(b: &[u8]) -> Option<DrawExt> {
+    let h = b.get(..6)?;
+    let n = h[0] as usize | (h[5] as usize >> 1) << 8;
+    if n > DRAW_VERT_SHADER_MAX_WORDS as usize || h[1..5].iter().any(|&k| k > 32) || h[5] & 1 == 0 {
+        return None;
+    }
+    let p = 6 + 4 * n + h[1..5].iter().map(|&k| k as usize).sum::<usize>() + 4 * h[4] as usize;
+    let (varyings, nw) = (*b.get(p)? as u32, *b.get(p + 1)? as usize);
+    if nw > 32 {
+        return None;
+    }
+    let (regs, vals) = (b.get(p + 2..p + 2 + nw)?, b.get(p + 2 + nw..p + 2 + 5 * nw)?);
+    Some(DrawExt { varyings, window: regs.iter().zip(vals.chunks_exact(4)).map(|(&r, v)| (r as u32, le32(v))).collect() })
+}
+
 fn blob_instrs(b: &[u8]) -> u32 {
     b[0] as u32 | ((b[5] >> 1) as u32) << 8
 }
@@ -181,8 +204,8 @@ pub struct Builder {
     setup_base: u32,
     half_w: u32,
     half_h: u32,
-    vert: Option<spirb_shader_t>,
-    frag: Option<spirb_shader_t>,
+    vert: Option<DrawExt>,
+    frag: Option<DrawExt>,
     vertex_count: u32,
     dp: DrawParams,
     clear: [u16; 3],
@@ -288,13 +311,9 @@ impl Builder {
         if n > DRAW_VERT_SHADER_MAX_WORDS {
             return;
         }
-        let mut parsed: spirb_shader_t = unsafe { std::mem::zeroed() };
         let (u0, words) = if stage == 0 { (DRAW_VS_CONST_U0, DRAW_VS_CONST_MAX_WORDS) } else { (DRAW_FS_CONST_U0, DRAW_FS_CONST_WORDS) };
-        let pr = unsafe { spirb_parse(blob.as_ptr(), &mut parsed) };
-        if pr < 0 || parsed.has_draw_ext == 0 {
-            return;
-        }
-        if parsed.window_regs[..parsed.num_window as usize].iter().any(|&r| (r as u32) < u0 || r as u32 >= u0 + words) {
+        let Some(parsed) = draw_ext(blob) else { return };
+        if parsed.window.iter().any(|&(r, _)| r < u0 || r >= u0 + words) {
             return;
         }
         let bytes = 6 + n as usize * 4;
@@ -377,7 +396,7 @@ impl Builder {
         if self.sh[stage].code != 0 {
             return;
         }
-        let sh = if stage == 0 { self.vert } else { self.frag }.unwrap();
+        let window = if stage == 0 { &self.vert } else { &self.frag }.as_ref().unwrap().window.clone();
         let n = blob_instrs(&self.sh[stage].blob);
         let (words, u0) = if stage == 0 { (DRAW_VS_CONST_MAX_WORDS, DRAW_VS_CONST_U0) } else { (DRAW_FS_CONST_WORDS, DRAW_FS_CONST_U0) };
         let a = self.alloc((n + 1) * 4);
@@ -389,8 +408,8 @@ impl Builder {
         for i in 0..words {
             g.mem(c + i * 4, 0);
         }
-        for i in 0..sh.num_window as usize {
-            g.mem(c + (sh.window_regs[i] as u32 - u0) * 4, sh.window_vals[i]);
+        for (r, v) in window {
+            g.mem(c + (r - u0) * 4, v);
         }
         (self.sh[stage].code, self.sh[stage].consts) = (a, c);
     }
@@ -410,8 +429,7 @@ impl Builder {
     pub fn draw(&mut self, g: &mut Prog) {
         let (bias_c, bias_s) = (self.bias[0], self.bias[1]);
         self.bias = [0; 2];
-        let Some(vert) = self.vert else { return };
-        let Some(shift) = record_shift(vert.num_varyings as u32) else { return };
+        let Some(shift) = self.vert.as_ref().and_then(|v| record_shift(v.varyings)) else { return };
         if self.vertex_count == 0 || self.sh[0].blob.is_empty() || self.sh[1].blob.is_empty() || self.frag.is_none() {
             return;
         }
@@ -900,6 +918,19 @@ mod tests {
         assert_eq!(f32_to_fp16(65504.0f32.to_bits()), 0x7BFF);
         assert_eq!(f32_to_fp16(1e9f32.to_bits()), 0x7BFF);
         assert_eq!(f32_to_fp16(6e-8f32.to_bits()), 1);
+    }
+
+    #[test]
+    fn draw_extension() {
+        // Two instructions, one uniform, no constants; 3 varyings and a window of u25 = 7.
+        let mut b = vec![2, 1, 0, 0, 0, 1];
+        b.extend([0; 8]);
+        b.extend([4, 3, 1, 25, 7, 0, 0, 0]);
+        let e = draw_ext(&b).unwrap();
+        assert_eq!((e.varyings, e.window), (3, vec![(25, 7)]));
+        assert!(draw_ext(&b[..b.len() - 1]).is_none());
+        b[5] = 0;
+        assert!(draw_ext(&b).is_none());
     }
 
     #[test]
