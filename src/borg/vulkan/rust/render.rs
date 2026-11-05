@@ -98,7 +98,7 @@ pointee!(VkRenderingInfo);
 
 entrypoint! {
     fn borgvk_CmdBeginRendering(c: &mut CommandBuffer, ri: &VkRenderingInfo) {
-        // Load clears write memory: at submit. A pass built while recording replays as its runs.
+        // Load clears write memory: at submit. A pass built while recording replays as its steps.
         let rec = c.recording();
         if !rec {
             let key = std::ptr::from_ref(ri) as usize;
@@ -150,16 +150,16 @@ entrypoint! {
         crate::draw::flush_draws(c);
         if c.recording() {
             let r = c.rec();
-            let runs = std::mem::take(&mut r.runs);
+            let steps = std::mem::take(&mut r.steps);
             if r.pure && !crate::memory::touched() {
-                r.passes.push((r.key, runs));
+                r.passes.push((r.key, steps));
             }
             r.active = false;
             return end_pass(c);
         }
         if let Some(i) = c.rec().skip.take() {
-            for run in &c.rec().passes[i].1 {
-                crate::draw::run(run);
+            for s in &c.rec().passes[i].1 {
+                s.run();
             }
         }
         let ra = c.render_area;

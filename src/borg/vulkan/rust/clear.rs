@@ -3,7 +3,7 @@
 
 //! Clears of images and of attachments, written by the host into the image memory.
 
-use crate::cmd_buffer::CommandBuffer;
+use crate::cmd_buffer::{CommandBuffer, Step};
 use crate::entrypoint::{entrypoint, pointee};
 use crate::ffi::*;
 use crate::fmt;
@@ -112,26 +112,39 @@ pub fn clear_rect(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkCl
 
 entrypoint! {
     fn borgvk_CmdClearAttachments(c: &mut CommandBuffer, _natt: u32, atts: &[VkClearAttachment], _nrects: u32, rects: &[VkClearRect]) {
+        if c.skipping() {
+            return;
+        }
         crate::draw::flush_draws(c); // the draws so far come first
         if !c.in_rendering {
             return;
         }
+        let rec = c.recording();
+        let clear = |c: &mut CommandBuffer, view: &vk_image_view, aspect, value: &VkClearValue, r: &VkClearRect| {
+            if rec {
+                let step = Step::Clear { view, aspect, value: *value, rect: r.rect, layer: r.baseArrayLayer, layers: r.layerCount };
+                c.rec().steps.push(step);
+            } else {
+                clear_rect(view, aspect, value, r.rect, r.baseArrayLayer, r.layerCount);
+            }
+        };
         for att in atts {
             let has = |a| att.aspectMask & a != 0;
             if has(VK_IMAGE_ASPECT_COLOR_BIT) {
-                if let Some(view) = (att.colorAttachment < c.color_attachment_count).then(|| c.color_view(att.colorAttachment as usize)).flatten() {
+                let view = (att.colorAttachment < c.color_attachment_count).then(|| c.color_view(att.colorAttachment as usize)).flatten();
+                if let Some(view) = view.map(std::ptr::from_ref) {
                     for r in rects {
-                        clear_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);
+                        clear(c, unsafe { &*view }, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, r);
                     }
                 }
                 continue;
             }
             for r in rects {
-                if let Some(view) = c.depth_view().filter(|_| has(VK_IMAGE_ASPECT_DEPTH_BIT)) {
-                    clear_rect(view, VK_IMAGE_ASPECT_DEPTH_BIT, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);
+                if let Some(view) = c.depth_view().filter(|_| has(VK_IMAGE_ASPECT_DEPTH_BIT)).map(std::ptr::from_ref) {
+                    clear(c, unsafe { &*view }, VK_IMAGE_ASPECT_DEPTH_BIT, &att.clearValue, r);
                 }
-                if let Some(view) = c.stencil_view().filter(|_| has(VK_IMAGE_ASPECT_STENCIL_BIT)) {
-                    clear_rect(view, VK_IMAGE_ASPECT_STENCIL_BIT, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);
+                if let Some(view) = c.stencil_view().filter(|_| has(VK_IMAGE_ASPECT_STENCIL_BIT)).map(std::ptr::from_ref) {
+                    clear(c, unsafe { &*view }, VK_IMAGE_ASPECT_STENCIL_BIT, &att.clearValue, r);
                 }
             }
         }

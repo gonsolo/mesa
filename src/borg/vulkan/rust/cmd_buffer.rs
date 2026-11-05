@@ -102,15 +102,42 @@ pub struct Recorded {
     pub key: usize, // the open pass's recorded VkRenderingInfo
     pub active: bool,
     pub pure: bool,
-    pub queries: u32, // open at this point of the recording
-    pub runs: Vec<Run>,
-    pub passes: Vec<(usize, Vec<Run>)>,
-    pub skip: Option<usize>, // replay: the pass whose runs replace its draws
+    pub steps: Vec<Step>,
+    pub passes: Vec<(usize, Vec<Step>)>,
+    pub skip: Option<usize>, // replay: the pass whose steps replace its draws and clears
+}
+
+/// What a pass built while recording does at submit, in order.
+pub enum Step {
+    Run(Run),
+    Clear { view: *const vk_image_view, aspect: VkImageAspectFlags, value: VkClearValue, rect: VkRect2D, layer: u32, layers: u32 },
+    Avail(*const QueryPool, u32), // a query that ended without a draw
+}
+
+impl Step {
+    pub fn run(&self) {
+        match self {
+            Step::Run(r) => crate::draw::run(r),
+            Step::Clear { view, aspect, value, rect, layer, layers } => {
+                crate::clear::clear_rect(unsafe { &**view }, *aspect, value, *rect, *layer, *layers)
+            }
+            Step::Avail(pool, q) => {
+                if let Some(s) = unsafe { &**pool }.slot(*q) {
+                    s.avail.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 impl CommandBuffer {
     pub fn recording(&self) -> bool {
         self.vk.state == MESA_VK_COMMAND_BUFFER_STATE_RECORDING
+    }
+
+    /// Replay of a pass built while recording.
+    pub fn skipping(&self) -> bool {
+        !self.recording() && self.record.as_ref().is_some_and(|r| r.skip.is_some())
     }
 
     pub fn rec(&mut self) -> &mut Recorded {

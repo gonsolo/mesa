@@ -3,7 +3,7 @@
 
 //! Render passes built while recording: the graphics commands of a primary command buffer run
 //! when they are recorded as well as recorded for replay. A pass whose draws read or write host
-//! memory meanwhile, or that clears, queries or runs secondaries, builds at submit instead.
+//! memory meanwhile, or that draws indirect or runs secondaries, builds at submit instead.
 #![allow(non_snake_case)]
 
 use crate::cmd_buffer::{cmd, CommandBuffer};
@@ -65,9 +65,8 @@ fn begin(c: &mut CommandBuffer) -> bool {
     // The pass is known by its recorded VkRenderingInfo, which replay hands back.
     let last = c.vk.cmd_queue.cmds.prev.cast::<vk_cmd_queue_entry>();
     let key = unsafe { last.as_ref() }.filter(|e| e.type_ == VK_CMD_BEGIN_RENDERING).map(|e| unsafe { e.u.begin_rendering.rendering_info });
-    let open = c.rec().queries;
     let r = c.rec();
-    (r.key, r.active, r.pure) = (key.map_or(0, |k| k as usize), key.is_some(), open == 0);
+    (r.key, r.active, r.pure) = (key.map_or(0, |k| k as usize), key.is_some(), true);
     key.is_some()
 }
 
@@ -88,6 +87,9 @@ both! {
     CmdSetStencilReference(f: VkStencilFaceFlags, r: u32) always;
     CmdDraw(n: u32, inst: u32, first: u32, first_inst: u32) in_pass;
     CmdDrawIndexed(n: u32, inst: u32, first: u32, voff: i32, first_inst: u32) in_pass;
+    CmdClearAttachments(na: u32, a: *const VkClearAttachment, nr: u32, r: *const VkClearRect) in_pass;
+    CmdBeginQuery(pool: VkQueryPool, q: u32, flags: VkQueryControlFlags) always;
+    CmdEndQuery(pool: VkQueryPool, q: u32) always;
 }
 
 // In the replay table's union of aliases: borgvk's own entries.
@@ -101,26 +103,7 @@ both!(@ CmdEndRendering() in_pass, |_: &Device| borgvk_CmdEndRendering);
 impure! {
     CmdDrawIndirect(b: VkBuffer, off: VkDeviceSize, n: u32, stride: u32);
     CmdDrawIndexedIndirect(b: VkBuffer, off: VkDeviceSize, n: u32, stride: u32);
-    CmdClearAttachments(na: u32, a: *const VkClearAttachment, nr: u32, r: *const VkClearRect);
     CmdExecuteCommands(n: u32, cbs: *const VkCommandBuffer);
-}
-
-unsafe extern "C" fn CmdBeginQuery(cb: VkCommandBuffer, pool: VkQueryPool, q: u32, flags: VkQueryControlFlags) {
-    unsafe { (vk_cmd_enqueue_device_entrypoints.CmdBeginQuery.unwrap())(cb, pool, q, flags) };
-    let c = unsafe { cmd(cb.cast()) };
-    if primary(c) {
-        let r = c.rec();
-        (r.queries, r.pure) = (r.queries + 1, false);
-    }
-}
-
-unsafe extern "C" fn CmdEndQuery(cb: VkCommandBuffer, pool: VkQueryPool, q: u32) {
-    unsafe { (vk_cmd_enqueue_device_entrypoints.CmdEndQuery.unwrap())(cb, pool, q) };
-    let c = unsafe { cmd(cb.cast()) };
-    if primary(c) {
-        let r = c.rec();
-        (r.queries, r.pure) = (r.queries.saturating_sub(1), false);
-    }
 }
 
 /// The record table's entries that also build passes.
