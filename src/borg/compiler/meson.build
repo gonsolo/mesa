@@ -4,11 +4,13 @@
 # borgc: the Borg shader compiler crate (Rust), exposing a C ABI so the borgvk
 # Vulkan driver can call it. Modeled on Mesa's NAK (src/nouveau/compiler).
 
-# The option word's bits come from the header the driver includes, so there is one definition.
+# The option word's bits come from the header the driver includes, so there is one definition;
+# the scratch region from the Borg repo's generated layout (make rdl).
 _borgc_flags_rs = rust.bindgen(
   input : 'borgc_flags.h',
   output : 'borgc_flags.rs',
-  args : [bindgen_output_args, '--allowlist-var', 'BORGC_.*'],
+  args : [bindgen_output_args, '--allowlist-var', 'BORGC_.*|BORG_SCRATCH_SPI'],
+  c_args : ['-include', meson.project_source_root() / '../out/hardware/borg/rdl/borg_layout.h'],
 )
 
 _libborgc_flags = static_library(
