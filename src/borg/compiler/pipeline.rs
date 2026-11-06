@@ -39,8 +39,9 @@ impl ShaderState {
         }
         // Private arrays a run-time index reaches take the first spill slots, a word each.
         if stage != Stage::Compute && (*nir).scratch_size > 0 {
+            // The base now; its head goes in after the prologue (lib.rs), ahead of any spill.
             st.spill.slots = (*nir).scratch_size.div_ceil(4);
-            st.late_head();
+            st.spill.base = Some(st.sel.fresh());
         }
         st.frag.push_window = push_window && stage == Stage::Fragment;
         st.frag.out_select = out_select;

@@ -395,6 +395,9 @@ unsafe fn compile_nir_inner(
     let mut prog = std::mem::take(&mut cx.cs.prologue);
     prog.append(&mut cx.sel.prog);
     cx.sel.prog = prog;
+    if cx.spill.base.is_some() {
+        cx.late_head();
+    }
     if let Err(e) = cx.check_selected() {
         eprintln!("borgc: refused: {e}");
         return 0;
