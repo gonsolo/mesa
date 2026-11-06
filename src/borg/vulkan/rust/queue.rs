@@ -16,7 +16,7 @@ unsafe fn work(q: &mut vk_queue, submit: &mut vk_queue_submit) -> VkResult {
             crate::draw::flush_draws(&mut *cb.cast()); // draws outside a pass end
         }
     }
-    VK_SUCCESS
+    if crate::sim::lost() { VK_ERROR_DEVICE_LOST } else { VK_SUCCESS }
 }
 
 /// # Safety

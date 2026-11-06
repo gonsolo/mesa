@@ -14,7 +14,6 @@ use crate::pipeline::Pipeline;
 use crate::descriptor_set::{find_flat, DescriptorSet};
 use crate::state_upload::DEFAULT_SAMPLER;
 use crate::texture_upload::{generic_texture, in_place};
-use crate::util::{log, MESA_LOG_WARN};
 
 const SLOT_BYTES: u32 = 0x80000 * 4;
 const BASE_BYTES: u32 = 0x40000 * 4;
@@ -419,7 +418,7 @@ fn merge(bufs: &[CsBuf], outs: &[Option<Vec<u8>>], ran: &mut bool) -> Vec<Vec<u8
     let mut merged: Vec<Vec<u8>> = bufs.iter().map(|b| b.data().to_vec()).collect();
     for out in outs {
         let Some(out) = out else {
-            log(MESA_LOG_WARN, "borgvk: compute sim failed".into());
+            crate::sim::lose("compute sim failed");
             *ran = false;
             continue;
         };

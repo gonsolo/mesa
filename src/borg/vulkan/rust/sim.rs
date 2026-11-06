@@ -144,6 +144,18 @@ impl Server {
 
 static SERVERS: Mutex<[Server; MAX_PARTS]> = Mutex::new([const { Server::new() }; MAX_PARTS]);
 
+static LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A simulator that failed loses the device: its work did not happen.
+pub fn lose(why: &str) {
+    log(MESA_LOG_WARN, format!("borgvk: {why}"));
+    LOST.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn lost() -> bool {
+    LOST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn stop_all(s: &mut [Server]) {
     s.iter_mut().for_each(Server::stop);
 }
@@ -839,7 +851,7 @@ pub fn run_pass(
 
     let mut all = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
     if !start_servers(&mut all[..], np, wp, hp, direct.as_deref()) {
-        log(MESA_LOG_WARN, "borgvk: cannot start the simulator".into());
+        lose("cannot start the simulator");
         stop_all(&mut all[..]);
         return none;
     }
@@ -858,7 +870,7 @@ pub fn run_pass(
             let host = run_all(&mut all[..np], prog, rows_per, key.is_some());
             let pages = host.and_then(|h| if key.is_some() { pass_pages(&mut all[..np], h) } else { Some(Vec::new()) });
             let Some(pages) = pages else {
-                log(MESA_LOG_WARN, "borgvk: the simulator stopped answering".into());
+                lose("the simulator stopped answering");
                 stop_all(&mut all[..]);
                 return none;
             };
