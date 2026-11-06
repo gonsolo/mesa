@@ -15,8 +15,8 @@ use crate::Mnem;
 fn tex_op_ok(op: nir_texop, stage: Stage) -> bool {
     match op {
         nir_texop_txs | nir_texop_query_levels | nir_texop_texture_samples => true,
-        nir_texop_txl => stage != Stage::Other,
-        nir_texop_tex | nir_texop_txf | nir_texop_txf_ms => stage != Stage::Compute,
+        nir_texop_txl | nir_texop_txf | nir_texop_txf_ms => stage != Stage::Other,
+        nir_texop_tex => stage != Stage::Compute,
         nir_texop_txb | nir_texop_tg4 | nir_texop_lod => stage == Stage::Fragment,
         _ => false,
     }
