@@ -704,9 +704,11 @@ impl ShaderState {
         if store {
             let v = intr.get_src(0).as_def().index;
             let mask = intr.get_const_index(NIR_INTRINSIC_WRITE_MASK) as u32;
+            // SWS as a spill: a helper lane keeps its own array too.
+            let sw = if self.stage == Stage::Compute { Op::Sw } else { Op::Sws };
             for c in (0..n).filter(|c| mask >> c & 1 != 0) {
                 let x = self.operand(v, c as u8);
-                self.sel.prog.push(BorgInstr { mnem: Op::Sw.into(), dst: NO_DST, srcs: vec![addr, x.0], swz: vec![0, x.1], imm: imm + 16 * c });
+                self.sel.prog.push(BorgInstr { mnem: sw.into(), dst: NO_DST, srcs: vec![addr, x.0], swz: vec![0, x.1], imm: imm + 16 * c });
             }
         } else {
             let comps = (0..n).map(|c| {
