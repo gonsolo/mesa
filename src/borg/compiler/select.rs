@@ -643,6 +643,15 @@ impl ShaderState {
             }
             nir_intrinsic_load_constant => self.constant_load(intr),
             nir_intrinsic_load_frag_coord if self.stage == Stage::Fragment => self.frag_coord(intr),
+            // A point is drawn as six vertices: its index is r30 / 6.
+            nir_intrinsic_load_vertex_id if self.flags.point_quads() => {
+                let idx = self.sel.fresh();
+                self.sel.loc.insert(idx, Loc::Fixed(30));
+                let (m, two) = (self.konst(0xAAAA_AAAB), self.konst(2));
+                let h = self.sel.op0(Op::Mulhu, vec![idx, m]);
+                let q = self.sel.op0(Op::Isrl, vec![h, two]);
+                self.sel.vec_map.insert(intr.def.index, vec![(q, 0)]);
+            }
             nir_intrinsic_load_vertex_id => {
                 self.sel.loc.insert(intr.def.index, Loc::Fixed(30));
                 self.vert.vertex_id_def = Some(intr.def.index);
