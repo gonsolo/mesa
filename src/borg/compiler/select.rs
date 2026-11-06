@@ -1352,12 +1352,13 @@ impl ShaderState {
             let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32;
             for (c, &(vd0, vc)) in comps.iter().enumerate() {
                 let mut vd = vd0;
-                // SOUT stores a register; a constant living in the uniform window needs a copy.
-                if matches!(self.sel.loc.get(&vd), Some(Loc::Uniform(_))) {
+                // SOUT stores a whole register: a constant in the uniform window or a block element
+                // (a texture result) needs a copy.
+                if vc != 0 || matches!(self.sel.loc.get(&vd), Some(Loc::Uniform(_))) {
                     // An integer add keeps the bits of an integer constant (a float move changes a NaN or denormal).
                     let zero = self.cp.zero(&mut self.sel);
                     let out = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: out, srcs: vec![zero, vd], swz: vec![0, 0], imm: 0 });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: out, srcs: vec![zero, vd], swz: vec![0, vc], imm: 0 });
                     vd = out;
                 }
                 let index = base_index + c as u32;
@@ -1365,7 +1366,6 @@ impl ShaderState {
                     self.refuse(format!("SOUT index {index} does not fit a byte"));
                 }
                 self.sout_varying(vd, index);
-                let _ = vc;
             }
         }
         self.outs.stores.insert(loc, comps);
