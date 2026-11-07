@@ -229,6 +229,9 @@ pub struct Builder {
     tex_n: u32,
     tex_lvl: [u32; 12],
     push_used: bool,
+    /// The push words, and their copy in this list (0: none yet): each draw reads its own.
+    push: [u32; PUSH_MAX_WORDS as usize],
+    push_at: u32,
     list: List,
     occ: (bool, u32),
     window_tiles: u32,
@@ -272,6 +275,8 @@ impl Builder {
             tex_n: 1,
             tex_lvl: [0; 12],
             push_used: false,
+            push: [0; PUSH_MAX_WORDS as usize],
+            push_at: 0,
             list: List { top: BORG_LIST_ENTRY_BYTES, ..Default::default() },
             occ: (false, 0),
             window_tiles: wt,
@@ -366,11 +371,11 @@ impl Builder {
 
     fn ls_base(&self, stage: u32) -> u32 {
         if self.dp.push_stage >> stage & 1 != 0 {
-            BORG_PUSH_CONST_SPI
+            self.push_at
         } else if self.dp.ubo_base != 0 {
             self.dp.ubo_base
         } else if self.push_used {
-            BORG_PUSH_CONST_SPI
+            self.push_at
         } else {
             DRAW_UBO_SPI
         }
@@ -423,6 +428,7 @@ impl Builder {
         self.sh[0].code = 0;
         self.sh[1].code = 0;
         self.vtab_dirty = true;
+        self.push_at = 0;
     }
 
     /// Queues the draw the last `Cmd::Draw` described.
@@ -437,6 +443,13 @@ impl Builder {
         let l = &self.list;
         if l.n != 0 && (shift != l.shift || l.tris + tris > self.setup_room_tris() || l.n >= BORG_LIST_ENTRY_BYTES / 8 - 1 || l.top + 0x4000 > BORG_LIST_BYTES) {
             self.flush(g);
+        }
+        if self.push_used && self.push_at == 0 {
+            let a = self.alloc(PUSH_MAX_WORDS * 4);
+            for (i, &w) in self.push.iter().enumerate() {
+                g.mem(a + 4 * i as u32, w);
+            }
+            self.push_at = a;
         }
         if self.list.n == 0 {
             (self.list.load, self.list.shift) = (self.dp.load, shift);
@@ -570,7 +583,7 @@ impl Builder {
 
     /// One command; false when it is malformed.
     pub fn apply(&mut self, g: &mut Prog, c: &Cmd) -> bool {
-        if matches!(c, Cmd::Push(..) | Cmd::TexChunk(..) | Cmd::Target(..) | Cmd::Pass(..) | Cmd::Att(..) | Cmd::Occ(..) | Cmd::Place(..) | Cmd::TexDesc(..)) {
+        if matches!(c, Cmd::TexChunk(..) | Cmd::Target(..) | Cmd::Pass(..) | Cmd::Att(..) | Cmd::Occ(..) | Cmd::Place(..) | Cmd::TexDesc(..)) {
             self.flush(g);
         }
         match c {
@@ -586,12 +599,8 @@ impl Builder {
                     return false;
                 }
                 let nw = nw.min(BORG_PUSH_CONST_MAX_WORDS - off);
-                for i in 0..nw {
-                    g.mem(BORG_PUSH_CONST_SPI + (off + i) * 4, words[i as usize]);
-                }
-                let root = Self::root_table(g, DRAW_ROOT_SPI, BORG_PUSH_CONST_SPI, TEX_DESC_TABLE_ADDR, SAMPLER_DESC_TABLE_ADDR, 0);
-                g.reg(r!(root), root);
-                self.push_used = true;
+                self.push[off as usize..(off + nw) as usize].copy_from_slice(&words[..nw as usize]);
+                (self.push_used, self.push_at) = (true, 0);
             }
             &Cmd::Blend(cfg, k) => {
                 g.reg(r!(blend_cfg), cfg);

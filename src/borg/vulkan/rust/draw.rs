@@ -552,9 +552,6 @@ impl Ctx<'_> {
         if c.batch_draws != 0 && (c.heap_top as u64 + need + 4 > HEAP_BYTES as u64 || full) {
             flush_draws(c);
         }
-        if c.batch_draws != 0 && pl.push_used && c.batch_push != c.pc {
-            flush_draws(c);
-        }
         // The constant pool's slot is one per pass.
         let me: *const c_void = std::ptr::from_ref(pl).cast();
         if c.batch_draws != 0 && pl.blob[BORGVK_STAGE_FRAG as usize].npool != 0 && !c.batch_pool.is_null() && c.batch_pool != me {
@@ -860,7 +857,7 @@ impl Ctx<'_> {
             let high = 128 - (smask | umask).leading_zeros();
             let fixed = if pl.spills { SPILL_SLOT + 1 } else if pl.push_window { PUSH_WINDOW_SLOT + 1 } else { 1 };
             let slots = fixed.max(if high > 0 { 1 + window_slot(high - 1) } else { 1 });
-            let reuse = c.region_set == set && c.batch_draws != 0 && umask == 0 && !any_dyn && sets[1].is_none() && !pl.spills && vbe.is_empty();
+            let reuse = c.region_set == set && c.batch_draws != 0 && umask == 0 && !any_dyn && sets[1].is_none() && !pl.spills && !pl.push_window && vbe.is_empty();
             let mut base = c.region_base;
             self.table = c.region_table;
             if !reuse {
@@ -1078,7 +1075,6 @@ impl Ctx<'_> {
         c.heap_top = self.heap.top;
         c.batch_draws += 1;
         c.batch_tris = c.batch_tris.saturating_add(self.p.count.saturating_mul(self.p.instances.max(1)) / 3);
-        c.batch_push = c.pc;
         (c.batch_img, c.batch_nextra, c.batch_extra) = (self.color, self.nextra as u32, self.extra);
         (c.batch_depth, c.batch_stencil) = (c.rendering.depth, c.rendering.stencil);
         build(c);

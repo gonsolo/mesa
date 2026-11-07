@@ -83,7 +83,6 @@ pub struct CommandBuffer {
     pub index_gpu: u32,       // its GPU address in the device heap, or 0
     pub index_avail: VkDeviceSize,
     pub index_size: u32,         // 2, 4, or 0 for an unsupported type
-    pub batch_push: [u32; 32],   // the push words the open batch was drawn with
     pub pc: [u32; 32],           // push-constant bytes
     pub push_lo: u32,            // word range written so far; empty when lo >= hi
     pub push_hi: u32,
