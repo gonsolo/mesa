@@ -299,8 +299,16 @@ impl Builder {
         g.reg(r!(flush_width), 31 - self.fb_w.max(1).leading_zeros());
         let frames = if self.place[0] != 0 || self.pitch != 0 { 0 } else if stride > 0x10_0000 { 1 } else { 2 };
         self.bin_base = DRAM_SPI_BASE + DRAM_OUT_OFFSET + frames * stride * 4;
-        let (ww, wh) = (self.fb_w.min(256), self.fb_h.min(256));
-        self.setup_base = self.bin_base + (ww >> 2) * (wh >> 2) * TBR_BIN_ROW_BYTES;
+        let (tw, th) = self.window();
+        self.setup_base = self.bin_base + tw * th * TBR_BIN_ROW_BYTES;
+    }
+
+    /// The render window in tiles: the target's width up to `window_tiles`, then as many rows as
+    /// the bin table holds, at most 128 (the 9-bit window coordinates).
+    fn window(&self) -> (u32, u32) {
+        let tw = (self.fb_w >> 2).min(self.window_tiles).max(1);
+        let th = (self.fb_h >> 2).min(self.window_tiles * self.window_tiles / tw).min(128).max(1);
+        (tw, th)
     }
 
     /// The target size.
@@ -540,9 +548,9 @@ impl Builder {
         let cc_hi = (self.clear[0] as u32) << 16 | self.clear[1] as u32;
         g.reg(r!(seq_fb_base), if self.place[0] != 0 { self.place[0] } else { DRAM_SPI_BASE + DRAM_OUT_OFFSET });
         let fb_tiles = self.fb_w >> 2;
-        let win = fb_tiles.min(self.window_tiles);
-        g.reg(r!(seq_tiles_per_row), win);
-        g.reg(r!(seq_tile_rows), win);
+        let (tw, th) = self.window();
+        g.reg(r!(seq_tiles_per_row), tw);
+        g.reg(r!(seq_tile_rows), th);
         g.reg(r!(fb_pitch), if self.pitch != 0 { self.pitch } else { fb_tiles });
         g.reg(r!(seq_clear_lo), cc_lo);
         g.reg(r!(seq_clear_hi), cc_hi);
@@ -563,7 +571,7 @@ impl Builder {
                 g.reg(reg, a);
             }
         }
-        g.op(&[TILES, fb_tiles, self.fb_h >> 2, win]);
+        g.op(&[TILES, fb_tiles, self.fb_h >> 2, tw, th]);
         g.reg(r!(render_list), 0);
     }
 
@@ -845,18 +853,18 @@ impl Prog {
                     i += 3;
                 }
                 TILES => {
-                    let (fb_tiles, fb_rows, win) = (w(i + 1), w(i + 2), w(i + 3));
+                    let (fb_tiles, fb_rows, tw, th) = (w(i + 1), w(i + 2), w(i + 3), w(i + 4));
                     let (y0, rows) = if n > 1 { (k * per, per.min(fb_rows.saturating_sub(k * per))) } else { (0, fb_rows) };
-                    for wy in (y0..y0 + rows).step_by(win.max(1) as usize) {
-                        for wx in (0..fb_tiles).step_by(win.max(1) as usize) {
-                            g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(win));
+                    for wy in (y0..y0 + rows).step_by(th.max(1) as usize) {
+                        for wx in (0..fb_tiles).step_by(tw.max(1) as usize) {
+                            g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(th));
                             g.reg(r!(fb_origin), wx | wy << 16);
                             g.reg(r!(seq_trigger), 1);
                             g.wait(r!(status), STATUS_REG_T__SEQ_BUSY_bm, 0);
                         }
                     }
                     g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
-                    i += 4;
+                    i += 5;
                 }
                 OCC_BEGIN => {
                     occ = 0;
