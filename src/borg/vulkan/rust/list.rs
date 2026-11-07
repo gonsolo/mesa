@@ -300,7 +300,8 @@ impl Builder {
         let frames = if self.place[0] != 0 || self.pitch != 0 { 0 } else if stride > 0x10_0000 { 1 } else { 2 };
         self.bin_base = DRAM_SPI_BASE + DRAM_OUT_OFFSET + frames * stride * 4;
         let (tw, th) = self.window();
-        self.setup_base = self.bin_base + tw * th * TBR_BIN_ROW_BYTES;
+        // A word per triangle below the records: the box cache (SEQ_TILE_ROWS[13:12]).
+        self.setup_base = self.bin_base + tw * th * TBR_BIN_ROW_BYTES + 4 * LIST_MAX_TRIS;
     }
 
     /// The render window in tiles: the target's width up to `window_tiles`, then as many rows as
@@ -428,7 +429,7 @@ impl Builder {
     }
 
     fn setup_room_tris(&self) -> u32 {
-        ((BORG_HEAP_SPI - self.setup_base) / TBR_SETUP_ENTRY_BYTES).min(60000)
+        ((BORG_HEAP_SPI - self.setup_base) / TBR_SETUP_ENTRY_BYTES).min(LIST_MAX_TRIS)
     }
 
     fn list_reset(&mut self) {
@@ -782,6 +783,8 @@ impl Builder {
 const MEM: u32 = 0;
 const REG: u32 = 1;
 const TILES: u32 = 2;
+/// The most triangles a list holds.
+const LIST_MAX_TRIS: u32 = 60000;
 const OCC_BEGIN: u32 = 3;
 const OCC: u32 = 4;
 
@@ -855,9 +858,13 @@ impl Prog {
                 TILES => {
                     let (fb_tiles, fb_rows, tw, th) = (w(i + 1), w(i + 2), w(i + 3), w(i + 4));
                     let (y0, rows) = if n > 1 { (k * per, per.min(fb_rows.saturating_sub(k * per))) } else { (0, fb_rows) };
+                    // More than one window: the first writes the box cache, the others skip what misses them.
+                    let many = rows.div_ceil(th.max(1)) * fb_tiles.div_ceil(tw.max(1)) > 1;
+                    let mut box_mode = if many { 1 } else { 0 };
                     for wy in (y0..y0 + rows).step_by(th.max(1) as usize) {
                         for wx in (0..fb_tiles).step_by(tw.max(1) as usize) {
-                            g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(th));
+                            g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(th) | box_mode << 12);
+                            box_mode = if many { 2 } else { 0 };
                             g.reg(r!(fb_origin), wx | wy << 16);
                             g.reg(r!(seq_trigger), 1);
                             g.wait(r!(status), STATUS_REG_T__SEQ_BUSY_bm, 0);
