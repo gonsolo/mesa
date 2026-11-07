@@ -121,7 +121,8 @@ const VB: usize = BORGVK_MAX_VERTEX_BINDINGS as usize;
 const BINDINGS: usize = BORGVK_MAX_BINDINGS as usize;
 const LINE_END: [usize; 6] = [0, 0, 1, 0, 1, 1];
 const LINE_SIDE: [f32; 6] = [-1.0, 1.0, -1.0, 1.0, 1.0, -1.0];
-const CORNER: [[f32; 2]; 6] = [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
+// A point is one triangle around its square; the fragment shader discards what lies outside.
+const CORNER: [[f32; 2]; 3] = [[-0.5, -0.5], [1.5, -0.5], [-0.5, 1.5]];
 
 #[derive(Clone, Copy, Debug)]
 enum Reject {
@@ -405,7 +406,7 @@ impl Ctx<'_> {
             return Err(Reject::NoShader);
         }
         self.points = pl.topology == Topology::Points;
-        self.x = if self.points { 6 } else { 1 };
+        self.x = if self.points { 3 } else { 1 };
         // A line is a quad too, but its six rows are gathered per line (see `pairs`).
         self.lines = matches!(pl.topology, Topology::Lines | Topology::LineStrip);
 

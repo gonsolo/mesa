@@ -55,7 +55,9 @@ impl Flags {
     pub fn half_channels(self) -> usize {
         if self.0 & BORGC_FS_HALF1 != 0 { 1 } else if self.0 & BORGC_FS_HALF3 != 0 { 3 } else if self.0 & BORGC_FS_HALF4 != 0 || self.dst_half() { 4 } else { 2 }
     }
-    pub fn pntc_base(self) -> u32 { self.0 >> BORGC_FS_PNTC_BASE_SHIFT }
+    /// A point pipeline's fragment shader: gl_PointCoord's varying, stored plus one.
+    pub fn points(self) -> bool { self.0 >> BORGC_FS_PNTC_BASE_SHIFT != 0 }
+    pub fn pntc_base(self) -> u32 { (self.0 >> BORGC_FS_PNTC_BASE_SHIFT).wrapping_sub(1) }
 }
 
 #[cfg(test)]
@@ -92,6 +94,6 @@ mod tests {
 
     #[test]
     fn pntc_base_is_the_top_byte() {
-        assert_eq!(Flags(7 << 24 | 0x2000_0000).pntc_base(), 0x27);
+        assert_eq!(Flags(7 << 24 | 0x2000_0000).pntc_base(), 0x26);
     }
 }

@@ -96,6 +96,9 @@ impl ShaderState {
         if is_vertex && flags.point_quads() {
             self.epilogue_point_quads();
         }
+        if is_fragment && flags.points() {
+            self.epilogue_point_discard();
+        }
         // Alpha to coverage reads r24 whatever the target's format packs.
         let alpha = self.outs.frag[3].filter(|_| is_fragment && self.frag.alpha && !flags.bytes_packed() && !flags.multi_target());
         if is_fragment && flags.multi_target() {

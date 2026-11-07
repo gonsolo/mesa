@@ -1,5 +1,5 @@
 use crate::state::ShaderState;
-use crate::{packed_layout, BorgInstr, Loc};
+use crate::{packed_layout, BorgInstr, Loc, NO_DST};
 use crate::opcodes::Op;
 use crate::opcodes::CSR_ATTACHMENT;
 
@@ -11,7 +11,25 @@ impl ShaderState {
         d
     }
 
-    /// Vertex epilogue for points, which are drawn as quads of six vertices. Fetches the corner's
+    /// Fragment epilogue for points: the triangle around the point's square leaves the
+    /// fragments with gl_PointCoord outside [0, 1)^2 discarded.
+    pub unsafe fn epilogue_point_discard(&mut self) {
+        let base = self.flags.pntc_base();
+        let one = self.konst(1.0f32.to_bits());
+        let mut inside = None;
+        for k in 0..2 {
+            let x = self.interpolated(base + k);
+            let x1 = self.sel.fsub((x, 0), (one, 0));
+            let (lo, hi) = (self.sel.op0(Op::Fstep, vec![x]), self.sel.op0(Op::Fstep, vec![x1]));
+            let i = self.sel.fsub((lo, 0), (hi, 0));
+            inside = Some(match inside { None => i, Some(p) => self.sel.op0(Op::Fmul, vec![p, i]) });
+        }
+        let out = self.sel.fsub((one, 0), (inside.unwrap(), 0));
+        let out = self.sel.op0(Op::F2i, vec![out]);
+        self.sel.prog.push(BorgInstr { mnem: Op::Csrrw.into(), dst: NO_DST, srcs: vec![out], swz: vec![0], imm: crate::opcodes::CSR_DISCARD });
+    }
+
+    /// Vertex epilogue for points, each drawn as one triangle around its square. Fetches the corner's
     /// clip-space offset and point coordinate by vertex index, scales the offset by gl_PointSize
     /// (clamped to 1..64) and w, and adds it to the position. The point coordinate also goes out
     /// as two varyings when the fragment shader reads gl_PointCoord.

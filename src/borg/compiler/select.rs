@@ -643,13 +643,13 @@ impl ShaderState {
             }
             nir_intrinsic_load_constant => self.constant_load(intr),
             nir_intrinsic_load_frag_coord if self.stage == Stage::Fragment => self.frag_coord(intr),
-            // A point is drawn as six vertices: its index is r30 / 6.
+            // A point is drawn as three vertices: its index is r30 / 3.
             nir_intrinsic_load_vertex_id if self.flags.point_quads() => {
                 let idx = self.sel.fresh();
                 self.sel.loc.insert(idx, Loc::Fixed(30));
-                let (m, two) = (self.konst(0xAAAA_AAAB), self.konst(2));
+                let (m, one) = (self.konst(0xAAAA_AAAB), self.konst(1));
                 let h = self.sel.op0(Op::Mulhu, vec![idx, m]);
-                let q = self.sel.op0(Op::Isrl, vec![h, two]);
+                let q = self.sel.op0(Op::Isrl, vec![h, one]);
                 self.sel.vec_map.insert(intr.def.index, vec![(q, 0)]);
             }
             nir_intrinsic_load_vertex_id => {
@@ -890,6 +890,21 @@ impl ShaderState {
             })
             .collect();
         self.sel.vec_map.insert(intr.def.index, comps);
+    }
+
+    /// Varying `index` at the pixel, perspective-correct with r5-r7.
+    pub(crate) fn interpolated(&mut self, index: u32) -> u32 {
+        let bary = [5u8, 6, 7].map(|r| {
+            let v = self.sel.fresh();
+            self.sel.loc.insert(v, Loc::Fixed(r));
+            self.frag.per_pixel_fixed.insert(v);
+            v
+        });
+        let a = self.sel.fresh();
+        self.fattr_dsts.insert(a);
+        self.sel.prog.push(BorgInstr { mnem: Op::Fattr.into(), dst: a, srcs: vec![], swz: vec![], imm: index });
+        let t1 = self.sel.op(Op::Fmadd, vec![bary[1], a, a], vec![0, 1, 0]);
+        self.sel.op(Op::Fmadd, vec![bary[2], a, t1], vec![0, 2, 0])
     }
 
     /// A word of the triangle's record (u0-u19), through its CSR as the raster ROM reads it.

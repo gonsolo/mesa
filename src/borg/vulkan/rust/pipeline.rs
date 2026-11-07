@@ -253,16 +253,17 @@ fn compile_stages(dev: &Device, sc: &mut Scratch, stages: &[VkPipelineShaderStag
     }
     let vs = stages.iter().filter(|s| s.stage == VK_SHADER_STAGE_VERTEX_BIT).last();
     let fs = stages.iter().filter(|s| s.stage == VK_SHADER_STAGE_FRAGMENT_BIT).last();
-    // Points: gl_PointCoord as varyings past the vertex shader's own.
-    if let (true, Some(vs), Some(fs)) = (points, vs, fs) {
+    // Points: gl_PointCoord as varyings past the vertex shader's own; the fragment shader
+    // discards what of the point's triangle lies outside its square.
+    if let (true, Some(vs)) = (points, vs) {
         let b = &sc.shader_blob[VERT];
         let base = num_varyings(&b.data[..(b.len as usize).min(b.data.len())]);
-        compile_stage(dev, sc, frag_opt | base << BORGC_FS_PNTC_BASE_SHIFT, fs);
-        if sc.frag_reads_pntc && base + 2 <= 255 {
-            compile_stage(dev, sc, vfetch | BORGC_VS_PNTC_VARYINGS, vs);
-        } else {
-            compile_stage(dev, sc, frag_opt, fs);
+        let opt = frag_opt | (base + 1) << BORGC_FS_PNTC_BASE_SHIFT;
+        match fs {
+            Some(fs) => compile_stage(dev, sc, opt, fs),
+            None => compile_empty_frag(sc, opt),
         }
+        compile_stage(dev, sc, vfetch | BORGC_VS_PNTC_VARYINGS, vs);
     }
 }
 
