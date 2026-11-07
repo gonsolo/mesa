@@ -56,6 +56,31 @@ pub fn uses_push_constants(nir: &nir_shader) -> bool {
     intrinsics(nir).any(|i| i.intrinsic == nir_intrinsic_load_push_constant)
 }
 
+/// A variable's varying slots, as a mask from VARYING_SLOT_VAR0.
+fn slots(var: &nir_variable) -> u64 {
+    let first = var.data.location as u32 - VARYING_SLOT_VAR0;
+    let n = unsafe { glsl_count_attribute_slots(var.type_, false) };
+    (0..n).fold(0, |m, k| m | 1u64.checked_shl(first + k).unwrap_or(0))
+}
+
+/// The varying slots a fragment shader reads flat.
+pub fn flat_inputs(nir: &nir_shader) -> u64 {
+    nir.iter_variables()
+        .filter(|v| v.data.mode() == nir_var_shader_in && v.data.location >= VARYING_SLOT_VAR0 as i32 && v.data.interpolation() == INTERP_MODE_FLAT)
+        .fold(0, |m, v| m | slots(v))
+}
+
+/// A vertex shader's outputs flat exactly where the fragment shader reads them flat.
+pub fn link_flat(nir: *mut nir_shader, flat: u64) {
+    for var in unsafe { &*nir }.iter_variables() {
+        if var.data.mode() == nir_var_shader_out && var.data.location >= VARYING_SLOT_VAR0 as i32 {
+            let s = slots(var);
+            let mode = if s != 0 && flat & s == s { INTERP_MODE_FLAT } else { INTERP_MODE_NONE };
+            unsafe { (*std::ptr::from_ref(var).cast_mut()).data.set_interpolation(mode) };
+        }
+    }
+}
+
 pub fn reads_point_coord(nir: &nir_shader) -> bool {
     intrinsics(nir).any(|i| i.intrinsic == nir_intrinsic_load_point_coord)
 }

@@ -244,6 +244,7 @@ fn shader_blend(cb: Option<&VkPipelineColorBlendStateCreateInfo>, f0: VkFormat, 
 
 fn compile_stages(dev: &Device, sc: &mut Scratch, stages: &[VkPipelineShaderStageCreateInfo], vfetch: u32, frag_opt: u32, points: bool) {
     let opt = |s: &VkPipelineShaderStageCreateInfo| if s.stage == VK_SHADER_STAGE_FRAGMENT_BIT { frag_opt } else { vfetch };
+    sc.frag_flat = 0;
     for s in stages {
         compile_stage(dev, sc, opt(s), s);
     }
@@ -253,6 +254,10 @@ fn compile_stages(dev: &Device, sc: &mut Scratch, stages: &[VkPipelineShaderStag
     }
     let vs = stages.iter().filter(|s| s.stage == VK_SHADER_STAGE_VERTEX_BIT).last();
     let fs = stages.iter().filter(|s| s.stage == VK_SHADER_STAGE_FRAGMENT_BIT).last();
+    // Varyings the fragment shader reads flat: the vertex shader writes no differences for them.
+    if let (Some(vs), true) = (vs, sc.frag_flat != 0) {
+        compile_stage(dev, sc, vfetch, vs);
+    }
     // Points: gl_PointCoord as varyings past the vertex shader's own; the fragment shader
     // discards what of the point's triangle lies outside its square.
     if let (true, Some(vs)) = (points, vs) {

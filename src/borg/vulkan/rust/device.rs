@@ -48,6 +48,7 @@ pub struct Scratch {
     pub tex_pairs: Vec<[u8; 2]>, // the pipeline's descriptor indices: texture and sampler flat slots
     pub frag_select: u32, // 1 + the colour output the fragment shader keeps; 0 keeps all
     pub frag_reads_pntc: bool,
+    pub frag_flat: u64,
     pub blend_cfg: u32,
     pub blend_const: u32,
     pub state_reg: [u32; 5],
@@ -74,6 +75,7 @@ impl Default for Scratch {
             tex_pairs: Default::default(),
             frag_select: 0,
             frag_reads_pntc: false,
+            frag_flat: 0,
             blend_cfg: 0,
             blend_const: 0,
             state_reg: [0; 5],

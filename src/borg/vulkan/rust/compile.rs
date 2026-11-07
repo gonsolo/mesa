@@ -93,6 +93,11 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
             return;
         }
     };
+    if vs {
+        link_flat(nir, sc.frag_flat);
+    } else if fs {
+        sc.frag_flat = flat_inputs(unsafe { &*nir });
+    }
     let lines = BORGC_VS_FETCH | BORGC_VS_POINT_QUADS | BORGC_VS_LINES_BIT;
     if vs && vfetch & lines == BORGC_VS_FETCH | BORGC_VS_LINES_BIT {
         lower_lines(nir, vfetch & 0xFFFF);

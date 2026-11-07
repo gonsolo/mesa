@@ -152,6 +152,8 @@ pub struct Frag {
 pub struct Vert {
     pub vertex_id_def: Option<u32>,
     pub descriptor_defs: HashSet<u32>,
+    /// Varying slots written flat: the fragment shader reads only the provoking corner.
+    pub flat_out: u64,
 }
 
 /// Spilling: its outcome and the scratch slots used.

@@ -1389,7 +1389,12 @@ impl ShaderState {
                 if index >= 256 {
                     self.refuse(format!("SOUT index {index} does not fit a byte"));
                 }
-                self.sout_varying(vd, index);
+                if self.vert.flat_out >> loc.wrapping_sub(VARYING_SLOT_VAR0).min(63) & 1 != 0 {
+                    self.sel.prog.push(BorgInstr { mnem: Op::Sout.into(), dst: NO_DST, srcs: vec![vd], swz: vec![0], imm: index });
+                    self.outs.roots.push(vd);
+                } else {
+                    self.sout_varying(vd, index);
+                }
             }
         }
         self.outs.stores.insert(loc, comps);
