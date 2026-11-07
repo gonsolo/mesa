@@ -16,11 +16,13 @@ impl ShaderState {
     pub unsafe fn epilogue_point_discard(&mut self) {
         let base = self.flags.pntc_base();
         let one = self.konst(1.0f32.to_bits());
+        // 2^-10 of slack: a pixel centre on the square's edge interpolates to about 0 or 1.
+        let (lo_edge, hi_edge) = (self.konst((1.0f32 / 1024.0).to_bits()), self.konst((1.0f32 - 1.0 / 1024.0).to_bits()));
         let mut inside = None;
         for k in 0..2 {
             let x = self.interpolated(base + k);
-            let x1 = self.sel.fsub((x, 0), (one, 0));
-            let (lo, hi) = (self.sel.op0(Op::Fstep, vec![x]), self.sel.op0(Op::Fstep, vec![x1]));
+            let (xl, xh) = (self.sel.op0(Op::Fadd, vec![x, lo_edge]), self.sel.fsub((x, 0), (hi_edge, 0)));
+            let (lo, hi) = (self.sel.op0(Op::Fstep, vec![xl]), self.sel.op0(Op::Fstep, vec![xh]));
             let i = self.sel.fsub((lo, 0), (hi, 0));
             inside = Some(match inside { None => i, Some(p) => self.sel.op0(Op::Fmul, vec![p, i]) });
         }
