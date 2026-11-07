@@ -381,7 +381,13 @@ fn viewport(pl: &mut Pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) 
         }
     }
     pl.vp = Vp::default();
-    let Some(vs) = unsafe { c.pViewportState.as_ref() }.filter(|_| !discard) else {
+    // Rasterizer discard: the vertex shader runs, an empty scissor keeps every fragment out.
+    if discard {
+        (pl.vp_dyn, pl.sc_dyn) = (false, false);
+        (pl.vp.v, pl.vp.valid) = ([0.0, 0.0, 1.0, 1.0, 0.0, 1.0], true);
+        return;
+    }
+    let Some(vs) = (unsafe { c.pViewportState.as_ref() }) else {
         return;
     };
     if !vs.pViewports.is_null() && vs.viewportCount != 0 && !pl.vp_dyn {
