@@ -212,10 +212,16 @@ impl crate::list::Gpu for Dev {
         for w in [off, mask, val] {
             q.extend_from_slice(&w.to_le_bytes());
         }
-        self.put(&q);
-        let mut r = [0u8; 4];
-        self.get(&mut r);
-        u32::from_le_bytes(r)
+        // A poll answers after 200M cycles even when the condition does not hold yet.
+        loop {
+            self.put(&q);
+            let mut r = [0u8; 4];
+            self.get(&mut r);
+            let v = u32::from_le_bytes(r);
+            if v & mask == val || !self.ok {
+                return v;
+            }
+        }
     }
 
     fn mem(&mut self, addr: u32, v: u32) {

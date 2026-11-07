@@ -577,12 +577,18 @@ impl crate::list::Gpu for Raw<'_> {
         self.ask(&q)
     }
 
+    // A poll answers after 200M cycles even when the condition does not hold yet.
     fn wait(&mut self, off: u32, mask: u32, val: u32) -> u32 {
         let mut q = vec![b'P'];
         for w in [off, mask, val] {
             q.extend_from_slice(&w.to_le_bytes());
         }
-        self.ask(&q)
+        loop {
+            let v = self.ask(&q);
+            if v & mask == val || !self.ok {
+                return v;
+            }
+        }
     }
 
     fn mem(&mut self, addr: u32, v: u32) {
