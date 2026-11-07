@@ -538,6 +538,7 @@ struct Raw<'a> {
     regs: Vec<u8>,
     n: u32,
     ok: bool,
+    pages: Option<std::collections::HashSet<u32>>,   // the pages the host wrote, for the pass cache
 }
 
 impl Raw<'_> {
@@ -585,6 +586,9 @@ impl crate::list::Gpu for Raw<'_> {
     }
 
     fn mem(&mut self, addr: u32, v: u32) {
+        if let Some(pages) = &mut self.pages {
+            pages.insert(addr >> 12);
+        }
         let p = match crate::heap::get().and_then(|h| h.host(addr)) {
             Some(p) => p,
             None if (addr as usize) + 4 <= MEM_BYTES => self.s.mem(addr),
@@ -595,7 +599,8 @@ impl crate::list::Gpu for Raw<'_> {
 }
 
 /// Every server renders the lists, each its strip of tile rows.
-fn run_all(servers: &mut [Server], prog: &Prog, rows_per: u32) -> bool {
+/// Runs the program on every strip; the pages the host wrote on each, when `track`.
+fn run_all(servers: &mut [Server], prog: &Prog, rows_per: u32, track: bool) -> Option<Vec<std::collections::HashSet<u32>>> {
     let np = servers.len() as u32;
     std::thread::scope(|sc| {
         let runs: Vec<_> = servers
@@ -603,17 +608,144 @@ fn run_all(servers: &mut [Server], prog: &Prog, rows_per: u32) -> bool {
             .enumerate()
             .map(|(k, s)| {
                 sc.spawn(move || {
-                    let mut g = Raw { s, regs: Vec::new(), n: 0, ok: true };
+                    let mut g = Raw { s, regs: Vec::new(), n: 0, ok: true, pages: track.then(Default::default) };
                     prog.run(&mut g, (k as u32, np, rows_per));
                     g.send();
                     let mut sync = [0u8];
-                    g.ok && g.s.to.as_mut().is_some_and(|to| to.write_all(b"S").is_ok())
-                        && g.s.from.as_mut().is_some_and(|f| f.read_exact(&mut sync).is_ok())
+                    let ok = g.ok && g.s.to.as_mut().is_some_and(|to| to.write_all(b"S").is_ok())
+                        && g.s.from.as_mut().is_some_and(|f| f.read_exact(&mut sync).is_ok());
+                    ok.then(|| g.pages.unwrap_or_default())
                 })
             })
             .collect();
-        runs.into_iter().fold(true, |ok, r| r.join().unwrap_or(false) && ok)
+        runs.into_iter().map(|r| r.join().ok().flatten()).collect()
     })
+}
+
+/// The pass cache (BORGVK_PASS_CACHE=<dir>): the pages each pass wrote, by its number in the run
+/// and a fingerprint of its program. A rerun writes them back instead of simulating, so a long
+/// case goes on where an interrupted run stopped. Every pass then starts fresh simulators.
+struct PassCache {
+    dir: std::path::PathBuf,
+    next: u64,
+    reading: bool,
+}
+
+static PASS_CACHE: std::sync::OnceLock<Option<Mutex<PassCache>>> = std::sync::OnceLock::new();
+
+fn pass_cache() -> Option<&'static Mutex<PassCache>> {
+    PASS_CACHE
+        .get_or_init(|| std::env::var_os("BORGVK_PASS_CACHE").filter(|d| !d.is_empty()).map(|d| {
+            let dir = std::path::PathBuf::from(d);
+            let _ = std::fs::create_dir_all(&dir);
+            Mutex::new(PassCache { dir, next: 0, reading: true })
+        }))
+        .as_ref()
+}
+
+/// A page the pass wrote: its strip (255 for the shared device heap), number and contents.
+type CachedPage = (u8, u32, Vec<u8>);
+const PAGE: usize = 4096;
+
+/// The pass's number and fingerprint, or None without the cache.
+fn pass_key(prog: &Prog, np: usize, rows_per: u32) -> Option<(u64, u64)> {
+    use std::hash::{Hash, Hasher};
+    let c = pass_cache()?;
+    let mut h = std::hash::DefaultHasher::new();
+    let (buf, run) = prog.words();
+    (buf, run, np, rows_per).hash(&mut h);
+    let mut c = c.lock().unwrap_or_else(|e| e.into_inner());
+    let n = c.next;
+    c.next += 1;
+    Some((n, h.finish()))
+}
+
+fn pass_path(c: &PassCache, n: u64) -> std::path::PathBuf {
+    c.dir.join(format!("{n:08}.pass"))
+}
+
+/// The pages of pass `n` if an earlier run stored them with the same fingerprint.
+fn pass_load((n, fp): (u64, u64)) -> Option<Vec<CachedPage>> {
+    let mut c = pass_cache()?.lock().unwrap_or_else(|e| e.into_inner());
+    let b = c.reading.then(|| std::fs::read(pass_path(&c, n)).ok()).flatten();
+    let pages = b.as_deref().and_then(|b| {
+        let word = |at: usize, n: usize| b.get(at..at + n);
+        (word(0, 4)? == b"BPC1" && u64::from_le_bytes(word(4, 8)?.try_into().ok()?) == fp).then_some(())?;
+        let count = u32::from_le_bytes(word(12, 4)?.try_into().ok()?) as usize;
+        (0..count)
+            .map(|i| {
+                let at = 16 + i * (5 + PAGE);
+                Some((word(at, 1)?[0], u32::from_le_bytes(word(at + 1, 4)?.try_into().ok()?), word(at + 5, PAGE)?.to_vec()))
+            })
+            .collect::<Option<Vec<_>>>()
+    });
+    // A missing or different pass: this run goes its own way from here.
+    c.reading &= pages.is_some();
+    pages
+}
+
+fn pass_save((n, fp): (u64, u64), pages: &[CachedPage]) {
+    let Some(c) = pass_cache() else { return };
+    let c = c.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = Vec::with_capacity(16 + pages.len() * (5 + PAGE));
+    b.extend_from_slice(b"BPC1");
+    b.extend_from_slice(&fp.to_le_bytes());
+    b.extend_from_slice(&(pages.len() as u32).to_le_bytes());
+    for (s, p, d) in pages {
+        b.push(*s);
+        b.extend_from_slice(&p.to_le_bytes());
+        b.extend_from_slice(d);
+    }
+    let path = pass_path(&c, n);
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &b).is_ok() {
+        let _ = std::fs::rename(tmp, path);
+    }
+}
+
+/// Where page `p` of strip `k` lives in the host's mappings.
+fn page_ptr(servers: &[Server], k: usize, p: u32) -> Option<*mut u8> {
+    let addr = p.checked_mul(PAGE as u32)?;
+    match crate::heap::get().and_then(|h| h.host(addr)) {
+        Some(ptr) => Some(ptr),
+        None => ((addr as usize) + PAGE <= MEM_BYTES).then(|| servers[k].mem(addr)),
+    }
+}
+
+/// The pages a pass wrote: what the simulators report ('D') and what the host wrote.
+fn pass_pages(servers: &mut [Server], host: Vec<std::collections::HashSet<u32>>) -> Option<Vec<CachedPage>> {
+    let mut heap_seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (k, mut pages) in host.into_iter().enumerate() {
+        let s = &mut servers[k];
+        let mut n = [0u8; 4];
+        s.to.as_mut()?.write_all(b"D").ok()?;
+        s.from.as_mut()?.read_exact(&mut n).ok()?;
+        let mut list = vec![0u8; 4 * u32::from_le_bytes(n) as usize];
+        s.from.as_mut()?.read_exact(&mut list).ok()?;
+        pages.extend(list.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())));
+        let mut pages: Vec<u32> = pages.into_iter().collect();
+        pages.sort_unstable();
+        for p in pages {
+            let heap = crate::heap::get().and_then(|h| h.host(p * PAGE as u32)).is_some();
+            if heap && !heap_seen.insert(p) {
+                continue;
+            }
+            let Some(ptr) = page_ptr(servers, k, p) else { continue };
+            let data = unsafe { std::slice::from_raw_parts(ptr, PAGE) }.to_vec();
+            out.push((if heap { 255 } else { k as u8 }, p, data));
+        }
+    }
+    Some(out)
+}
+
+fn apply_pages(servers: &[Server], pages: &[CachedPage]) {
+    for (s, p, d) in pages {
+        let k = if *s == 255 { 0 } else { *s as usize };
+        if let Some(ptr) = page_ptr(servers, k, *p) {
+            unsafe { std::ptr::copy_nonoverlapping(d.as_ptr(), ptr, PAGE) };
+        }
+    }
 }
 
 fn start_servers(all: &mut [Server], np: usize, wp: u32, hp: u32, direct: Option<&OsStr>) -> bool {
@@ -713,10 +845,23 @@ pub fn run_pass(
     if hw {
         crate::dev::with(|d| run_on_device(d, &all[0], &l, &t, prog, wb, occ, rows_per));
     } else {
-        if !run_all(&mut all[..np], prog, rows_per) {
-            log(MESA_LOG_WARN, "borgvk: the simulator stopped answering".into());
+        let key = pass_key(prog, np, rows_per);
+        if let Some(pages) = key.and_then(pass_load) {
+            apply_pages(&all[..np], &pages);
+        } else {
+            let host = run_all(&mut all[..np], prog, rows_per, key.is_some());
+            let pages = host.and_then(|h| if key.is_some() { pass_pages(&mut all[..np], h) } else { Some(Vec::new()) });
+            let Some(pages) = pages else {
+                log(MESA_LOG_WARN, "borgvk: the simulator stopped answering".into());
+                stop_all(&mut all[..]);
+                return none;
+            };
+            if let Some(k) = key {
+                pass_save(k, &pages);
+            }
+        }
+        if key.is_some() {
             stop_all(&mut all[..]);
-            return none;
         }
     }
     let mut changed = 0;

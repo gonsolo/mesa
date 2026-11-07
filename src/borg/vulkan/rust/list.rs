@@ -813,6 +813,11 @@ impl Prog {
     }
 
     /// Replays on `g` as strip `k` of `n`, `per` tile rows each.
+    /// The program's words, for the pass cache's fingerprint.
+    pub fn words(&self) -> (&[u8], &[u32]) {
+        (self.buf.as_slice(), &self.run)
+    }
+
     pub fn run(&self, g: &mut dyn Gpu, (k, n, per): (u32, u32, u32)) {
         let b = self.buf.as_slice();
         let w = |i: usize| le32(&b[4 * i..]);
