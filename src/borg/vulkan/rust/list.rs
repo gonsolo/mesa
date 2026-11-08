@@ -23,6 +23,12 @@ pub trait Gpu {
             }
         }
     }
+    /// Whether window `n` of the program is already done (resumed from a checkpoint).
+    fn skip(&mut self, _n: u32) -> bool {
+        false
+    }
+    /// Windows 0..n are done.
+    fn done(&mut self, _n: u32) {}
 }
 
 macro_rules! r {
@@ -842,6 +848,8 @@ impl Prog {
         let b = self.buf.as_slice();
         let w = |i: usize| le32(&b[4 * i..]);
         let (mut i, mut occ) = (0, 0u32);
+        // Checkpoints stop at the first query: its count lives across windows.
+        let (mut win, mut queries) = (0u32, false);
         while 4 * i < b.len() {
             match w(i) {
                 MEM => {
@@ -863,18 +871,26 @@ impl Prog {
                     let mut box_mode = if many { 1 } else { 0 };
                     for wy in (y0..y0 + rows).step_by(th.max(1) as usize) {
                         for wx in (0..fb_tiles).step_by(tw.max(1) as usize) {
-                            g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(th) | box_mode << 12);
+                            let mode = box_mode;
                             box_mode = if many { 2 } else { 0 };
+                            win += 1;
+                            if g.skip(win - 1) {
+                                continue;
+                            }
+                            g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(th) | mode << 12);
                             g.reg(r!(fb_origin), wx | wy << 16);
                             g.reg(r!(seq_trigger), 1);
                             g.wait(r!(status), STATUS_REG_T__SEQ_BUSY_bm, 0);
+                            if !queries {
+                                g.done(win);
+                            }
                         }
                     }
                     g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
                     i += 5;
                 }
                 OCC_BEGIN => {
-                    occ = 0;
+                    (occ, queries) = (0, true);
                     i += 1;
                 }
                 _ => {
