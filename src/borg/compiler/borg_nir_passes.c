@@ -1470,13 +1470,13 @@ borg_pre_plain(nir_function_impl *pre)
    return true;
 }
 
-static nir_variable *
-borg_pre_var(nir_shader *s, nir_variable_mode mode, unsigned slot)
+/* Declared only: borgc takes a vertex shader's flat outputs from its variables. */
+static void
+borg_pre_var(nir_shader *vs, unsigned slot)
 {
-   nir_variable *var = nir_variable_create(s, mode, glsl_uvec4_type(), "borg_pre");
+   nir_variable *var = nir_variable_create(vs, nir_var_shader_out, glsl_uvec4_type(), "borg_pre");
    var->data.location = VARYING_SLOT_VAR0 + slot;
    var->data.interpolation = INTERP_MODE_FLAT;
-   return var;
 }
 
 static void
@@ -1497,6 +1497,17 @@ borg_hoist_uniform(nir_shader *fs, struct borg_hoist *h)
       .avoid_instr_cb = borg_pre_avoid,
    };
    nir_shader *c = nir_shader_clone(NULL, fs);
+   /* Always safe to read: then also from inside loops and branches. */
+   nir_foreach_function_impl(impl, c) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_push_constant)
+               nir_intrinsic_set_access(nir_instr_as_intrinsic(instr),
+                                        nir_intrinsic_access(nir_instr_as_intrinsic(instr)) | ACCESS_CAN_SPECULATE);
+         }
+      }
+   }
    unsigned size = 0;
    if (!nir_opt_preamble(c, &opts, &size) || !borg_pre_plain(nir_shader_get_preamble(c))) {
       ralloc_free(c);
@@ -1505,7 +1516,6 @@ borg_hoist_uniform(nir_shader *fs, struct borg_hoist *h)
    h->pre = nir_shader_clone(NULL, c);
    h->first_slot = first;
    nir_function_impl *impl = nir_shader_get_entrypoint(c);
-   nir_variable *vars[16] = { NULL };
    nir_builder b = nir_builder_create(impl);
    nir_foreach_block(block, impl) {
       nir_foreach_instr_safe(instr, block) {
@@ -1515,10 +1525,10 @@ borg_hoist_uniform(nir_shader *fs, struct borg_hoist *h)
          if (intr->intrinsic != nir_intrinsic_load_preamble)
             continue;
          const unsigned base = nir_intrinsic_base(intr), slot = first + base / 4;
-         if (!vars[slot])
-            vars[slot] = borg_pre_var(c, nir_var_shader_in, slot);
          b.cursor = nir_before_instr(instr);
-         nir_def *v = nir_channels(&b, nir_load_var(&b, vars[slot]), nir_component_mask(intr->def.num_components) << base % 4);
+         nir_def *v = nir_load_input(&b, intr->def.num_components, 32, nir_imm_int(&b, 0), .component = base % 4,
+                                     .dest_type = nir_type_uint32,
+                                     .io_semantics = (nir_io_semantics){ .location = VARYING_SLOT_VAR0 + slot, .num_slots = 1 });
          nir_def_replace(&intr->def, intr->def.bit_size == 1 ? nir_ine_imm(&b, v, 0) : v);
          h->slots |= 1ull << slot;
       }
@@ -1536,11 +1546,12 @@ borg_inline_uniform(nir_shader *vs, const struct borg_hoist *h)
    nir_function_impl *impl = nir_shader_get_entrypoint(vs);
    nir_foreach_block(block, impl) {
       nir_foreach_instr_safe(instr, block) {
-         if (instr->type != nir_instr_type_intrinsic || nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_store_deref)
+         if (instr->type != nir_instr_type_intrinsic || nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_store_output)
             continue;
-         nir_variable *var = nir_intrinsic_get_var(nir_instr_as_intrinsic(instr), 0);
-         if (var && var->data.mode == nir_var_shader_out && var->data.location >= VARYING_SLOT_VAR0 &&
-             var->data.location - VARYING_SLOT_VAR0 >= h->first_slot)
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         const unsigned loc = nir_intrinsic_io_semantics(intr).location;
+         if (loc >= VARYING_SLOT_VAR0 && nir_src_is_const(intr->src[1]) &&
+             loc - VARYING_SLOT_VAR0 + nir_src_as_uint(intr->src[1]) >= h->first_slot)
             nir_instr_remove(instr);
       }
    }
@@ -1570,11 +1581,11 @@ borg_inline_uniform(nir_shader *vs, const struct borg_hoist *h)
       nir_def *v[4];
       for (unsigned i = 0; i < 4; i++)
          v[i] = comps[4 * slot + i] ? comps[4 * slot + i] : nir_imm_int(&b, 0);
-      nir_store_var(&b, borg_pre_var(vs, nir_var_shader_out, slot), nir_vec(&b, v, 4), 0xf);
+      borg_pre_var(vs, slot);
+      nir_store_output(&b, nir_vec(&b, v, 4), nir_imm_int(&b, 0), .write_mask = 0xf, .src_type = nir_type_uint32,
+                       .io_semantics = (nir_io_semantics){ .location = VARYING_SLOT_VAR0 + slot, .num_slots = 1 });
    }
    nir_progress(true, impl, nir_metadata_none);
-   NIR_PASS(_, vs, nir_opt_dce);
-   NIR_PASS(_, vs, nir_remove_dead_variables, nir_var_shader_out, NULL);
 }
 
 void
@@ -1734,13 +1745,6 @@ borg_lower_nir_for_borgc_hoist(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_pack);
       NIR_PASS(_, nir, nir_lower_bit_size, borg_bit_size, NULL);
    }
-   if (h && nir->info.stage == MESA_SHADER_FRAGMENT) {
-      ralloc_free(h->pre);
-      *h = (struct borg_hoist){ 0 };
-      borg_hoist_uniform(nir, h);
-   } else if (h && h->pre && nir->info.stage == MESA_SHADER_VERTEX) {
-      borg_inline_uniform(nir, h);
-   }
    uint64_t flat_slots = 0;
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       nir_foreach_shader_in_variable(var, nir)
@@ -1779,6 +1783,14 @@ borg_lower_nir_for_borgc_hoist(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_lower_idiv, &(nir_lower_idiv_options){ 0 });
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_div_sqrt_filter, borg_div_sqrt_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
+   /* After the division lowering: a uniform divisor's reciprocal is a value of its own then. */
+   if (h && nir->info.stage == MESA_SHADER_FRAGMENT) {
+      ralloc_free(h->pre);
+      *h = (struct borg_hoist){ 0 };
+      borg_hoist_uniform(nir, h);
+   } else if (h && h->pre && nir->info.stage == MESA_SHADER_VERTEX) {
+      borg_inline_uniform(nir, h);
+   }
    NIR_PASS(_, nir, nir_lower_flrp, 32, false);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_quantize_filter, borg_quantize_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_frexp_filter, borg_frexp_lower, NULL);
