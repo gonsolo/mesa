@@ -4,7 +4,7 @@
 //! Graphics and compute pipelines: the stages compiled with the fetch, target and blend options
 //! of the pipeline, and the state the draw and the hardware registers take from it.
 
-use crate::compiler::{compile_compute_stage, compile_empty_frag, compile_stage, num_varyings, set_base};
+use crate::compiler::{clear_hoist, compile_compute_stage, compile_empty_frag, compile_stage, num_varyings, set_base};
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle, VkError};
 use crate::ffi::*;
 use crate::vk::*;
@@ -245,6 +245,7 @@ fn shader_blend(cb: Option<&VkPipelineColorBlendStateCreateInfo>, f0: VkFormat, 
 fn compile_stages(dev: &Device, sc: &mut Scratch, stages: &[VkPipelineShaderStageCreateInfo], vfetch: u32, frag_opt: u32, points: bool) {
     let opt = |s: &VkPipelineShaderStageCreateInfo| if s.stage == VK_SHADER_STAGE_FRAGMENT_BIT { frag_opt } else { vfetch };
     sc.frag_flat = 0;
+    clear_hoist(sc);
     for s in stages {
         compile_stage(dev, sc, opt(s), s);
     }
@@ -270,6 +271,7 @@ fn compile_stages(dev: &Device, sc: &mut Scratch, stages: &[VkPipelineShaderStag
         }
         compile_stage(dev, sc, vfetch | BORGC_VS_PNTC_VARYINGS, vs);
     }
+    clear_hoist(sc);
 }
 
 fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCallbacks, ci: &VkGraphicsPipelineCreateInfo) -> Result<VkPipeline, VkError> {

@@ -85,7 +85,7 @@ _borgvk_bindings_rs = rust.bindgen(
   c_args : [pre_args, borgvk_bindgen_c_args],
   args : [
     bindgen_output_args, borgvk_bindgen_args, '--no-prepend-enum-name', '--with-derive-default',
-    '--allowlist-type', 'vk_device|vk_device_dispatch_table|borg_blend|vk_descriptor_set_layout|list_head|vk_pipeline_layout|VkFormat|pipe_format',
+    '--allowlist-type', 'vk_device|vk_device_dispatch_table|borg_blend|borg_hoist|vk_descriptor_set_layout|list_head|vk_pipeline_layout|VkFormat|pipe_format',
     '--allowlist-type', 'vk_object_base|VkPipelineShaderStageCreateInfo|VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|pipe_swizzle|util_format_type',
     '--allowlist-function', 'util_format_description|util_format_get_block(size|width|height|depth)|vk_format_to_pipe_format',

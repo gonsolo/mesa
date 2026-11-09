@@ -70,6 +70,11 @@ fn entries() -> &'static [Entry] {
 }
 
 /// The cached blob of a stage and whether it reads gl_PointCoord.
+/// Whether blobs come from or go to a cache: its key is one stage's, so stages compile unlinked.
+pub fn active() -> bool {
+    !entries().is_empty() || env_path("BORGVK_SHADER_CACHE_RECORD").is_some()
+}
+
 pub fn get(si: &VkPipelineShaderStageCreateInfo, vfetch: u32, blob: &mut ShaderBlob) -> Option<bool> {
     let cache = entries();
     if cache.is_empty() {

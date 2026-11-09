@@ -12,7 +12,7 @@ use crate::device::Scratch;
 #[cfg(not(borgc))]
 use crate::pipeline::Pipeline;
 #[cfg(borgc)]
-pub use crate::compile::{compile_compute_stage, compile_empty_frag, compile_stage};
+pub use crate::compile::{clear_hoist, compile_compute_stage, compile_empty_frag, compile_stage};
 
 /// The number of varyings a vertex shader blob writes, from its header; 0 without the flag.
 pub fn num_varyings(b: &[u8]) -> u32 {
@@ -85,6 +85,9 @@ pub fn compile_stage(_dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipeli
 pub fn compile_compute_stage(_dev: &Device, _sc: &mut Scratch, _si: &VkPipelineShaderStageCreateInfo, pipeline: &mut Pipeline) {
     pipeline.cs_ok = false;
 }
+
+#[cfg(not(borgc))]
+pub fn clear_hoist(_sc: &mut Scratch) {}
 
 #[cfg(not(borgc))]
 pub fn compile_empty_frag(sc: &mut Scratch, _opt: u32) {

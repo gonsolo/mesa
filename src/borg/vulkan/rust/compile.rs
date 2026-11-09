@@ -104,7 +104,11 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
     }
     let retry = if vs || fs { unsafe { nir_shader_clone(null_mut(), nir) } } else { null_mut() };
     // After the lowering: a fragment shader's storage images become buffer accesses there.
-    unsafe { borg_lower_nir_for_borgc_blend(nir, blend) };
+    let hoist = if vs || fs { hoist(sc) } else { null_mut() };
+    unsafe { borg_lower_nir_for_borgc_hoist(nir, blend, hoist) };
+    if fs && !hoist.is_null() {
+        sc.frag_flat |= sc.hoist.slots;
+    }
     remap_array_bindings(sc, unsafe { &*nir });
     let n = unsafe { &*nir };
     sc.frag_reads_pntc = fs && reads_point_coord(n);
@@ -133,6 +137,17 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
     }
 }
 
+/// Where a stage's lowering keeps or takes the fragment shader's per-draw work; none with a shader
+/// cache, whose blobs are one stage's.
+fn hoist(sc: &mut Scratch) -> *mut borg_hoist {
+    if shader_cache::active() { null_mut() } else { &raw mut sc.hoist }
+}
+
+pub fn clear_hoist(sc: &mut Scratch) {
+    unsafe { ralloc_free(sc.hoist.pre.cast()) };
+    sc.hoist = borg_hoist { pre: null_mut(), first_slot: 0, slots: 0 };
+}
+
 /// borgc's blob for `slot`; a shader that does not fit is retried from `retry`, its unlowered
 /// clone: a vertex shader with rematerialized inputs, a fragment shader without flattened ifs.
 fn compile_blob(
@@ -154,7 +169,10 @@ fn compile_blob(
         unsafe {
             let set = if fs { borg_lower_set_no_flatten } else { borg_lower_set_vertex_remat };
             set(true);
-            borg_lower_nir_for_borgc_blend(retry, blend);
+            borg_lower_nir_for_borgc_hoist(retry, blend, hoist(sc));
+            if fs {
+                sc.frag_flat |= sc.hoist.slots;
+            }
             set(false);
             remap_array_bindings(sc, &*retry);
             let mut pairs = std::mem::take(&mut sc.tex_pairs);
