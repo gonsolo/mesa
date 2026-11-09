@@ -675,6 +675,23 @@ borg_fdiv_precise(nir_builder *b, nir_def *x, nir_def *y)
                     nir_bcsel(b, borg_is_finite(b, y), nir_fmul(b, x, nir_frcp(b, y)), nir_imm_float(b, 0.0f)));
 }
 
+/* x / c as x * (1/c): one rounding of the reciprocal at compile time keeps it within 1.5 ULP. */
+static nir_def *
+borg_fdiv_const(nir_builder *b, const nir_alu_instr *alu, nir_def *x)
+{
+   const nir_alu_src *s = &alu->src[1];
+   if (!nir_src_is_const(s->src))
+      return NULL;
+   nir_const_value r[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < alu->def.num_components; i++) {
+      const float c = nir_src_comp_as_float(s->src, s->swizzle[i]), q = 1.0f / c;
+      if (!isnormal(c) || !isnormal(q))
+         return NULL;
+      r[i] = nir_const_value_for_float(q, 32);
+   }
+   return nir_fmul(b, x, nir_build_imm(b, alu->def.num_components, 32, r));
+}
+
 static nir_def *
 borg_precise_lower_exact(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -687,8 +704,10 @@ borg_precise_lower_exact(nir_builder *b, nir_instr *instr, void *data)
    case nir_op_frsq:
       return nir_bcsel(b, borg_is_normal(b, x), borg_rsq_refined(b, x),
                        nir_bcsel(b, borg_is_finite(b, x), nir_frsq(b, x), zero));
-   case nir_op_fdiv:
-      return borg_fdiv_precise(b, x, nir_ssa_for_alu_src(b, alu, 1));
+   case nir_op_fdiv: {
+      nir_def *q = borg_fdiv_const(b, alu, x);
+      return q ? q : borg_fdiv_precise(b, x, nir_ssa_for_alu_src(b, alu, 1));
+   }
    case nir_op_fmod: {
       nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
       return nir_fsub(b, x, nir_fmul(b, y, nir_ffloor(b, borg_fdiv_precise(b, x, y))));
