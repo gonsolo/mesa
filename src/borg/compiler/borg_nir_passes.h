@@ -69,6 +69,15 @@ struct borg_blend {
 };
 void borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *blend);
 
+/* Work a fragment shader does the same for every pixel of a draw, done per triangle by the vertex
+ * shader instead and read as flat varyings: a fragment shader fills it in, its vertex shader takes it. */
+struct borg_hoist {
+   struct nir_shader *pre;
+   unsigned first_slot;
+   uint64_t slots;
+};
+void borg_lower_nir_for_borgc_hoist(struct nir_shader *nir, const struct borg_blend *blend, struct borg_hoist *h);
+
 /* Implemented in Rust (src/borg/compiler/lib.rs). Writes up to buf_cap bytes
  * into out_buf and sets *out_len to the true blob size, so *out_len > buf_cap
  * signals an undersized buffer; returns the instruction count. */

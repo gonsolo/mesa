@@ -1389,8 +1389,202 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
    borg_lower_nir_for_borgc_blend(nir, NULL);
 }
 
+static void
+borg_pre_size(nir_def *def, unsigned *size, unsigned *align, nir_preamble_class *class_)
+{
+   *size = def->num_components;
+   *align = def->num_components > 1 ? 4 : 1;
+   *class_ = nir_preamble_class_general;
+}
+
+/* Divisions and transcendentals lower to tens of instructions. */
+static float
+borg_pre_cost(nir_instr *instr, const void *data)
+{
+   if (instr->type == nir_instr_type_intrinsic)
+      return nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_push_constant;
+   if (instr->type != nir_instr_type_alu)
+      return 0;
+   const nir_alu_instr *alu = nir_instr_as_alu(instr);
+   switch (alu->op) {
+   case nir_op_mov:
+   case nir_op_vec2:
+   case nir_op_vec3:
+   case nir_op_vec4:
+      return 0;
+   case nir_op_udiv:
+   case nir_op_idiv:
+   case nir_op_umod:
+   case nir_op_imod:
+   case nir_op_irem:
+   case nir_op_fdiv:
+   case nir_op_frcp:
+   case nir_op_frsq:
+   case nir_op_fsqrt:
+   case nir_op_fexp2:
+   case nir_op_flog2:
+   case nir_op_fsin:
+   case nir_op_fcos:
+   case nir_op_fpow:
+      return 30.0f * alu->def.num_components;
+   default:
+      return alu->def.num_components;
+   }
+}
+
+static float
+borg_pre_rewrite_cost(nir_def *def, const void *data)
+{
+   return 2.0f * def->num_components;
+}
+
+static bool
+borg_pre_avoid(const nir_instr *instr, const void *data)
+{
+   return false;
+}
+
+/* Straight-line arithmetic on push constants only: the vertex shader can run it as it is. */
+static bool
+borg_pre_plain(nir_function_impl *pre)
+{
+   if (!exec_list_is_singular(&pre->body))
+      return false;
+   nir_foreach_block(block, pre) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic) {
+            const nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_store_preamble) {
+               const unsigned bits = nir_src_bit_size(intr->src[0]);
+               if (bits != 1 && bits != 32)
+                  return false;
+            } else if (intr->intrinsic != nir_intrinsic_load_push_constant) {
+               return false;
+            }
+         } else if (instr->type != nir_instr_type_alu && instr->type != nir_instr_type_load_const &&
+                    instr->type != nir_instr_type_undef) {
+            return false;
+         }
+      }
+   }
+   return true;
+}
+
+static nir_variable *
+borg_pre_var(nir_shader *s, nir_variable_mode mode, unsigned slot)
+{
+   nir_variable *var = nir_variable_create(s, mode, glsl_uvec4_type(), "borg_pre");
+   var->data.location = VARYING_SLOT_VAR0 + slot;
+   var->data.interpolation = INTERP_MODE_FLAT;
+   return var;
+}
+
+static void
+borg_hoist_uniform(nir_shader *fs, struct borg_hoist *h)
+{
+   unsigned first = 0;
+   nir_foreach_shader_in_variable(var, fs) {
+      if (var->data.location >= VARYING_SLOT_VAR0)
+         first = MAX2(first, var->data.location - VARYING_SLOT_VAR0 + glsl_count_attribute_slots(var->type, false));
+   }
+   if (first >= 16)
+      return;
+   const nir_opt_preamble_options opts = {
+      .def_size = borg_pre_size,
+      .preamble_storage_size[nir_preamble_class_general] = 4 * (16 - first),
+      .instr_cost_cb = borg_pre_cost,
+      .rewrite_cost_cb = borg_pre_rewrite_cost,
+      .avoid_instr_cb = borg_pre_avoid,
+   };
+   nir_shader *c = nir_shader_clone(NULL, fs);
+   unsigned size = 0;
+   if (!nir_opt_preamble(c, &opts, &size) || !borg_pre_plain(nir_shader_get_preamble(c))) {
+      ralloc_free(c);
+      return;
+   }
+   h->pre = nir_shader_clone(NULL, c);
+   h->first_slot = first;
+   nir_function_impl *impl = nir_shader_get_entrypoint(c);
+   nir_variable *vars[16] = { NULL };
+   nir_builder b = nir_builder_create(impl);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_load_preamble)
+            continue;
+         const unsigned base = nir_intrinsic_base(intr), slot = first + base / 4;
+         if (!vars[slot])
+            vars[slot] = borg_pre_var(c, nir_var_shader_in, slot);
+         b.cursor = nir_before_instr(instr);
+         nir_def *v = nir_channels(&b, nir_load_var(&b, vars[slot]), nir_component_mask(intr->def.num_components) << base % 4);
+         nir_def_replace(&intr->def, intr->def.bit_size == 1 ? nir_ine_imm(&b, v, 0) : v);
+         h->slots |= 1ull << slot;
+      }
+   }
+   exec_node_remove(&impl->preamble->node);
+   impl->preamble = NULL;
+   nir_progress(true, impl, nir_metadata_control_flow);
+   nir_shader_replace(fs, c);
+}
+
+/* The fragment shader's preamble at the top of the vertex shader, its results as flat outputs. */
+static void
+borg_inline_uniform(nir_shader *vs, const struct borg_hoist *h)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(vs);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic || nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_store_deref)
+            continue;
+         nir_variable *var = nir_intrinsic_get_var(nir_instr_as_intrinsic(instr), 0);
+         if (var && var->data.mode == nir_var_shader_out && var->data.location >= VARYING_SLOT_VAR0 &&
+             var->data.location - VARYING_SLOT_VAR0 >= h->first_slot)
+            nir_instr_remove(instr);
+      }
+   }
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_inline_function_impl(&b, nir_shader_get_preamble(h->pre), NULL, NULL);
+   nir_index_ssa_defs(impl);
+   nir_def *comps[64] = { NULL };
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_store_preamble)
+            continue;
+         nir_builder c = nir_builder_at(nir_before_instr(instr));
+         nir_def *v = intr->src[0].ssa;
+         if (v->bit_size == 1)
+            v = nir_b2i32(&c, v);
+         for (unsigned i = 0; i < v->num_components; i++)
+            comps[4 * h->first_slot + nir_intrinsic_base(intr) + i] = nir_channel(&c, v, i);
+         nir_instr_remove(instr);
+      }
+   }
+   /* Last: an output array of the vertex shader's own may run into these slots. */
+   b.cursor = nir_after_impl(impl);
+   u_foreach_bit64(slot, h->slots) {
+      nir_def *v[4];
+      for (unsigned i = 0; i < 4; i++)
+         v[i] = comps[4 * slot + i] ? comps[4 * slot + i] : nir_imm_int(&b, 0);
+      nir_store_var(&b, borg_pre_var(vs, nir_var_shader_out, slot), nir_vec(&b, v, 4), 0xf);
+   }
+   nir_progress(true, impl, nir_metadata_none);
+   NIR_PASS(_, vs, nir_opt_dce);
+   NIR_PASS(_, vs, nir_remove_dead_variables, nir_var_shader_out, NULL);
+}
+
 void
 borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *blend)
+{
+   borg_lower_nir_for_borgc_hoist(nir, blend, NULL);
+}
+
+void
+borg_lower_nir_for_borgc_hoist(struct nir_shader *nir, const struct borg_blend *blend, struct borg_hoist *h)
 {
    /* One invocation per workgroup: `shared` variables are private ones. */
    if (nir->info.stage == MESA_SHADER_COMPUTE && !nir->info.workgroup_size_variable &&
@@ -1539,6 +1733,13 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_fp16_casts, nir_lower_fp16_rtz | nir_lower_fp16_rtne);
       NIR_PASS(_, nir, nir_lower_pack);
       NIR_PASS(_, nir, nir_lower_bit_size, borg_bit_size, NULL);
+   }
+   if (h && nir->info.stage == MESA_SHADER_FRAGMENT) {
+      ralloc_free(h->pre);
+      *h = (struct borg_hoist){ 0 };
+      borg_hoist_uniform(nir, h);
+   } else if (h && h->pre && nir->info.stage == MESA_SHADER_VERTEX) {
+      borg_inline_uniform(nir, h);
    }
    uint64_t flat_slots = 0;
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
