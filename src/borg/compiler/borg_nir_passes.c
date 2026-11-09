@@ -675,6 +675,21 @@ borg_fdiv_precise(nir_builder *b, nir_def *x, nir_def *y)
                     nir_bcsel(b, borg_is_finite(b, y), nir_fmul(b, x, nir_frcp(b, y)), nir_imm_float(b, 0.0f)));
 }
 
+/* I2F is signed: an unsigned value below 2^31 converts with it alone, without select's split. */
+static bool
+borg_u2f_small(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+   if ((alu->op != nir_op_u2f32 && alu->op != nir_op_u2f16) || nir_src_bit_size(alu->src[0].src) != 32)
+      return false;
+   for (unsigned i = 0; i < alu->def.num_components; i++) {
+      nir_scalar s = nir_get_scalar(alu->src[0].src.ssa, alu->src[0].swizzle[i]);
+      if (nir_unsigned_upper_bound(b->shader, data, s) > INT32_MAX)
+         return false;
+   }
+   alu->op = alu->op == nir_op_u2f32 ? nir_op_i2f32 : nir_op_i2f16;
+   return true;
+}
+
 /* x / c as x * (1/c): one rounding of the reciprocal at compile time keeps it within 1.5 ULP. */
 static nir_def *
 borg_fdiv_const(nir_builder *b, const nir_alu_instr *alu, nir_def *x)
@@ -1626,6 +1641,9 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_dce);
 #endif
+   struct hash_table *range = _mesa_pointer_hash_table_create(NULL);
+   NIR_PASS(_, nir, nir_shader_alu_pass, borg_u2f_small, nir_metadata_control_flow, range);
+   _mesa_hash_table_destroy(range, NULL);
    NIR_PASS(_, nir, nir_opt_gcm, false);
    NIR_PASS(_, nir, nir_opt_sink, nir_move_const_undef | nir_move_load_ubo | nir_move_load_input | nir_move_comparisons | nir_move_copies | nir_move_alu);
 
