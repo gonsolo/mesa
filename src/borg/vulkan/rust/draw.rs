@@ -167,7 +167,6 @@ pub struct Run {
     serve: bool,
     area: [u32; 2],
     wb: Vec<Writeback>,
-    tris: u32,
     placed: bool,
     occ: Vec<OccRun>,
 }
@@ -204,12 +203,10 @@ pub fn take_run(c: &mut CommandBuffer) -> Option<Run> {
         serve: c.batch_serve,
         area: c.batch_area,
         wb: c.wb[..c.nwb as usize].to_vec(),
-        tris: c.batch_tris,
         placed: c.batch_in_place,
         occ: c.occ[..c.nocc as usize].to_vec(),
     };
     c.nocc = 0;
-    c.batch_tris = 0;
     c.nwb = 0;
     c.region_set = null_mut();
     (c.batch_pool, c.batch_vpool) = (null(), null());
@@ -244,7 +241,7 @@ pub fn run(r: &Run) {
     let words: Vec<u32> = r.occ.iter().map(|o| o.off).collect();
     let counts = if r.serve {
         let n = match &r.prog {
-            Some(p) if p.ok => run_pass(p, img, &extra, depth, stencil, &r.wb, r.area, &words, r.tris, r.placed),
+            Some(p) if p.ok => run_pass(p, img, &extra, depth, stencil, &r.wb, r.area, &words, r.placed),
             _ => vec![0; r.occ.len()],
         };
         if let (Some(path), Some(i)) = (std::env::var_os("BORGVK_DUMP_PPM").filter(|p| !p.is_empty()), img) {
@@ -1074,7 +1071,6 @@ impl Ctx<'_> {
         b.pending.extend(bytes);
         c.heap_top = self.heap.top;
         c.batch_draws += 1;
-        c.batch_tris = c.batch_tris.saturating_add(self.p.count.saturating_mul(self.p.instances.max(1)) / 3);
         (c.batch_img, c.batch_nextra, c.batch_extra) = (self.color, self.nextra as u32, self.extra);
         (c.batch_depth, c.batch_stencil) = (c.rendering.depth, c.rendering.stencil);
         build(c);

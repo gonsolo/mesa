@@ -58,7 +58,6 @@ pub struct CommandBuffer {
 
     pub heap_top: u32,
     pub batch_draws: u32,
-    pub batch_tris: u32, // at most, over the batch's draws
     pub batch_img: *mut Image,
     pub batch_extra: [*mut Image; 3], // colour attachments 1-3 of the batch
     pub batch_nextra: u32,
@@ -274,7 +273,7 @@ unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferRe
 
 /// The state commands set, as a replay starts.
 pub fn clear_state(c: &mut CommandBuffer) {
-    (c.heap_top, c.batch_draws, c.batch_tris) = (0, 0, 0);
+    (c.heap_top, c.batch_draws) = (0, 0);
     (c.occ_pool, c.occ_open, c.nocc) = (null(), false, 0);
     (c.batch_img, c.index_ptr, c.gfx_pipeline, c.desc_set, c.cs_pipeline) = (null_mut(), null_mut(), null_mut(), null_mut(), null_mut());
     (c.index_gpu, c.push_lo, c.push_hi) = (0, 0, 0);

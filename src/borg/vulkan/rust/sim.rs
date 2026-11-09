@@ -531,14 +531,13 @@ pub(crate) fn atoi(s: &str) -> i64 {
 }
 
 /// Strips of tile rows: how many simulators and how many rows each. Every strip shades all the
-/// vertices, so a pass with fewer than 16 pixels per triangle stays on one.
-fn strips(wp: u32, hp: u32, hw: bool, tris: u32) -> (usize, u32) {
+/// vertices, but walks the draw list only for its own tiles.
+fn strips(wp: u32, hp: u32, hw: bool) -> (usize, u32) {
     let np = match std::env::var_os("BORGVK_SERVE_PARTS") {
         Some(v) => atoi(&v.to_string_lossy()),
         None => (unsafe { sysconf(_SC_NPROCESSORS_ONLN as i32) } as i64).clamp(1, 12),
     };
-    let fragment_bound = (wp as u64 * hp as u64) >= 16 * tris as u64;
-    let np = if !hw && wp * hp >= PARALLEL_PIXELS && fragment_bound { np.clamp(1, MAX_PARTS as i64) as u32 } else { 1 };
+    let np = if !hw && wp * hp >= PARALLEL_PIXELS { np.clamp(1, MAX_PARTS as i64) as u32 } else { 1 };
     let ftiles = hp >> 2;
     let rows_per = ftiles.div_ceil(np);
     (ftiles.div_ceil(rows_per) as usize, rows_per)
@@ -866,7 +865,6 @@ pub fn run_pass(
     wb: &[Writeback],
     area: [u32; 2],
     occ: &[u32],
-    tris: u32,
     placed: bool,
 ) -> Vec<u64> {
     let none = vec![0; occ.len()];
@@ -898,7 +896,7 @@ pub fn run_pass(
 
     let direct = std::env::var_os("BORGVK_SIM_DIRECT");
     let hw = direct.is_none();
-    let (np, rows_per) = strips(wp, hp, hw, tris);
+    let (np, rows_per) = strips(wp, hp, hw);
     let rows = |part: usize| part as u32 * rows_per * 4..h.min((part as u32 + 1) * rows_per * 4);
 
     let mut all = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -993,11 +991,10 @@ mod tests {
 
     #[test]
     fn strips_cover_all_tile_rows() {
-        assert_eq!(strips(64, 64, true, 0), (1, 16));
+        assert_eq!(strips(64, 64, true), (1, 16));
         std::env::set_var("BORGVK_SERVE_PARTS", "3");
-        assert_eq!(strips(64, 64, false, 0), (3, 6));
-        assert_eq!(strips(64, 64, false, 4096), (1, 16));
-        assert_eq!(strips(32, 32, false, 0), (1, 8));
+        assert_eq!(strips(64, 64, false), (3, 6));
+        assert_eq!(strips(32, 32, false), (1, 8));
         std::env::remove_var("BORGVK_SERVE_PARTS");
     }
 
