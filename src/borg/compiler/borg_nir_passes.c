@@ -677,6 +677,26 @@ borg_fdiv_precise(nir_builder *b, nir_def *x, nir_def *y)
                     nir_bcsel(b, borg_is_finite(b, y), nir_fmul(b, x, nir_frcp(b, y)), nir_imm_float(b, 0.0f)));
 }
 
+/* nir_lower_idiv's remainder step r >= d ? r - d : r as umin(r, r - d): r - d wraps above r when r < d. */
+static bool
+borg_rem_step(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+   if (alu->op != nir_op_bcsel || alu->def.num_components != 1 || alu->def.bit_size != 32)
+      return false;
+   nir_alu_instr *ge = nir_def_as_alu_or_null(alu->src[0].src.ssa), *sub = nir_def_as_alu_or_null(alu->src[1].src.ssa);
+   if (!ge || ge->op != nir_op_uge || !sub || sub->op != nir_op_isub)
+      return false;
+   const nir_scalar r = nir_get_scalar(alu->src[2].src.ssa, alu->src[2].swizzle[0]);
+   const nir_scalar d = nir_get_scalar(sub->src[1].src.ssa, sub->src[1].swizzle[alu->src[1].swizzle[0]]);
+   if (!nir_scalar_equal(nir_get_scalar(ge->src[0].src.ssa, ge->src[0].swizzle[alu->src[0].swizzle[0]]), r) ||
+       !nir_scalar_equal(nir_get_scalar(ge->src[1].src.ssa, ge->src[1].swizzle[alu->src[0].swizzle[0]]), d) ||
+       !nir_scalar_equal(nir_get_scalar(sub->src[0].src.ssa, sub->src[0].swizzle[alu->src[1].swizzle[0]]), r))
+      return false;
+   b->cursor = nir_before_instr(&alu->instr);
+   nir_def_replace(&alu->def, nir_umin(b, nir_ssa_for_alu_src(b, alu, 2), nir_ssa_for_alu_src(b, alu, 1)));
+   return true;
+}
+
 /* I2F is signed: an unsigned value below 2^31 converts with it alone, without select's split. */
 static bool
 borg_u2f_small(nir_builder *b, nir_alu_instr *alu, void *data)
@@ -1783,6 +1803,7 @@ borg_lower_nir_for_borgc_hoist(struct nir_shader *nir, const struct borg_blend *
    /* Before frcp's refinement below: it needs the exact reciprocal. */
    NIR_PASS(_, nir, nir_opt_idiv_const, 32);
    NIR_PASS(_, nir, nir_lower_idiv, &(nir_lower_idiv_options){ 0 });
+   NIR_PASS(_, nir, nir_shader_alu_pass, borg_rem_step, nir_metadata_control_flow, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_div_sqrt_filter, borg_div_sqrt_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
    /* After the division lowering: a uniform divisor's reciprocal is a value of its own then. */
