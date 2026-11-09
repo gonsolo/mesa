@@ -34,10 +34,11 @@ static void
 usage(const char *argv0)
 {
    fprintf(stderr,
-      "usage: %s [-s vert|frag] [-e entry] [-n name] [-H out.h] [-o out.borg] in.spv\n"
+      "usage: %s [-s vert|frag] [-e entry] [-f frag.spv] [-n name] [-H out.h] [-o out.borg] in.spv\n"
       "\n"
       "  -s  shader stage (default: vert)\n"
       "  -e  SPIR-V entry point (default: main)\n"
+      "  -f  the fragment shader a vertex shader is paired with (its per-draw work moves here)\n"
       "  -n  C identifier for -H output (default: derived from -o)\n"
       "  -o  write the raw .borg blob here\n"
       "  -H  write a C header declaring <name>[] and <name>_len\n"
@@ -104,12 +105,13 @@ int
 main(int argc, char **argv)
 {
    const char *stage_name = "vert", *entry = "main", *out = NULL;
-   const char *hdr = NULL, *name = NULL, *in = NULL;
+   const char *hdr = NULL, *name = NULL, *in = NULL, *frag = NULL;
 
    for (int i = 1; i < argc; i++) {
       if (!strcmp(argv[i], "-s") && i + 1 < argc)      stage_name = argv[++i];
       else if (!strcmp(argv[i], "-e") && i + 1 < argc) entry = argv[++i];
       else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
+      else if (!strcmp(argv[i], "-f") && i + 1 < argc) frag = argv[++i];
       else if (!strcmp(argv[i], "-H") && i + 1 < argc) hdr = argv[++i];
       else if (!strcmp(argv[i], "-n") && i + 1 < argc) name = argv[++i];
       else if (argv[i][0] == '-')                     { usage(argv[0]); return 2; }
@@ -142,7 +144,22 @@ main(int argc, char **argv)
       return 1;
    }
 
-   borg_lower_nir_for_borgc(nir);
+   struct borg_hoist hoist = { 0 };
+   if (frag) {
+      size_t fwords = 0;
+      uint32_t *fspirv = read_spirv(frag, &fwords);
+      nir_shader *fs = fspirv ? spirv_to_nir(fspirv, fwords, NULL, MESA_SHADER_FRAGMENT, "main",
+                                             &borg_spirv_options, &borg_nir_options) : NULL;
+      if (!fs) {
+         fprintf(stderr, "borgc-cli: SPIR-V → NIR failed for %s\n", frag);
+         return 1;
+      }
+      borg_lower_nir_for_borgc_hoist(fs, NULL, &hoist);
+      ralloc_free(fs);
+      free(fspirv);
+   }
+   borg_lower_nir_for_borgc_hoist(nir, NULL, &hoist);
+   ralloc_free(hoist.pre);
 
    /* Two-call protocol: borgc reports the true blob size even when the buffer
     * is too small, so an oversized shader is a clear diagnostic rather than a
