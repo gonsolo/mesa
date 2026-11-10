@@ -1951,6 +1951,7 @@ borg_lower_nir_for_borgc_hoist(struct nir_shader *nir, const struct borg_blend *
       /* BORGC_NO_FLATTEN keeps every `if` as control flow, to exercise the mask path. */
       const nir_opt_peephole_select_options peephole_opts = {
          .limit = no_flatten || getenv("BORGC_NO_FLATTEN") ? 1 : 64, .indirect_load_ok = true, .expensive_alu_ok = true,
+         .discard_ok = true,
       };
       NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_opts);
       NIR_PASS(progress, nir, borg_select_words);
