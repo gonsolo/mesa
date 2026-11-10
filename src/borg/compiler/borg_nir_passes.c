@@ -806,6 +806,89 @@ borg_ubo_split_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_vec(b, c, ld->def.num_components);
 }
 
+/* A 32-bit word of a uniform load: its block, base offset and byte offset from the base. */
+struct borg_word {
+   nir_def *block;
+   nir_scalar base;
+   uint32_t byte;
+};
+
+static bool
+borg_ubo_word(nir_scalar v, struct borg_word *w)
+{
+   if (!nir_scalar_is_intrinsic(v) || nir_scalar_intrinsic_op(v) != nir_intrinsic_load_ubo || v.def->bit_size != 32)
+      return false;
+   nir_intrinsic_instr *ld = nir_def_as_intrinsic(v.def);
+   *w = (struct borg_word){ ld->src[0].ssa, nir_get_scalar(ld->src[1].ssa, 0), 4 * v.comp };
+   if (nir_scalar_is_alu(w->base) && nir_scalar_alu_op(w->base) == nir_op_iadd) {
+      for (unsigned i = 0; i < 2; i++) {
+         nir_scalar k = nir_scalar_chase_alu_src(w->base, i);
+         if (nir_scalar_is_const(k)) {
+            w->byte += nir_scalar_as_uint(k);
+            w->base = nir_scalar_chase_alu_src(w->base, 1 - i);
+            break;
+         }
+      }
+   }
+   return true;
+}
+
+/* i == 0 ? v.x : i == 1 ? v.y : ... over a uniform vector, i in range: one load of word i. */
+static bool
+borg_select_word(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+   if (alu->op != nir_op_bcsel || alu->def.num_components != 1 || alu->def.bit_size != 32)
+      return false;
+   nir_scalar v = nir_get_scalar(&alu->def, 0), s = { 0 };
+   struct borg_word w0 = { 0 };
+   unsigned seen = 0;
+   for (; nir_scalar_is_alu(v) && nir_scalar_alu_op(v) == nir_op_bcsel; v = nir_scalar_chase_alu_src(v, 2)) {
+      nir_scalar c = nir_scalar_chase_alu_src(v, 0);
+      if (!nir_scalar_is_alu(c) || nir_scalar_alu_op(c) != nir_op_ieq)
+         break;
+      nir_scalar x = nir_scalar_chase_alu_src(c, 0), k = nir_scalar_chase_alu_src(c, 1);
+      if (nir_scalar_is_const(x)) {
+         nir_scalar t = x;
+         x = k;
+         k = t;
+      }
+      struct borg_word w;
+      if (!nir_scalar_is_const(k) || nir_scalar_as_uint(k) > 3 || x.def->bit_size != 32 ||
+          !borg_ubo_word(nir_scalar_chase_alu_src(v, 1), &w))
+         break;
+      const uint32_t i = nir_scalar_as_uint(k);
+      if (!seen) {
+         s = x;
+         w0 = w;
+         w0.byte -= 4 * i;
+      }
+      if (!nir_scalar_equal(x, s) || w.block != w0.block || !nir_scalar_equal(w.base, w0.base) || w.byte != w0.byte + 4 * i)
+         break;
+      seen |= 1u << i;
+   }
+   struct borg_word w;
+   if (seen && seen != 0xf && borg_ubo_word(v, &w) && w.block == w0.block && nir_scalar_equal(w.base, w0.base) &&
+       w.byte - w0.byte < 16 && w.byte % 4 == w0.byte % 4)
+      seen |= 1u << (w.byte - w0.byte) / 4;
+   const uint32_t top = seen ? nir_unsigned_upper_bound(b->shader, data, s) : 4;
+   if (top > 3 || (seen & BITFIELD_MASK(top + 1)) != BITFIELD_MASK(top + 1))
+      return false;
+   b->cursor = nir_before_instr(&alu->instr);
+   nir_def *off = nir_iadd(b, nir_iadd_imm(b, nir_channel(b, w0.base.def, w0.base.comp), w0.byte),
+                           nir_ishl_imm(b, nir_channel(b, s.def, s.comp), 2));
+   nir_def_replace(&alu->def, nir_load_ubo(b, 1, 32, w0.block, off, .align_mul = 4, .align_offset = 0, .range = ~0u));
+   return true;
+}
+
+static bool
+borg_select_words(nir_shader *nir)
+{
+   struct hash_table *range = _mesa_pointer_hash_table_create(NULL);
+   const bool progress = nir_shader_alu_pass(nir, borg_select_word, nir_metadata_control_flow, range);
+   _mesa_hash_table_destroy(range, NULL);
+   return progress;
+}
+
 /* Repeat a scalar input or uniform load at each ALU use: reloading is cheaper than holding the register. */
 static int
 borg_use_order(const void *a, const void *b)
@@ -1870,6 +1953,7 @@ borg_lower_nir_for_borgc_hoist(struct nir_shader *nir, const struct borg_blend *
          .limit = no_flatten || getenv("BORGC_NO_FLATTEN") ? 1 : 64, .indirect_load_ok = true, .expensive_alu_ok = true,
       };
       NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_opts);
+      NIR_PASS(progress, nir, borg_select_words);
    } while (progress);
 #ifndef BORG_SMALL_NIR
    NIR_PASS(_, nir, nir_opt_algebraic_late);
