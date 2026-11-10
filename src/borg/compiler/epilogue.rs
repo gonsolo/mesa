@@ -68,26 +68,33 @@ impl ShaderState {
         }
         if let (Some(px), Some(py), Some(pw)) = (self.outs.pos[0], self.outs.pos[1], self.outs.pos[3]) {
             let w = self.sel.reg(pw);
-            let size = self.outs.psize.map(|ps| {
-                // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
-                let x = self.sel.reg(ps).0;
-                // upper: x -= step(x - 64) * (x - 64)
-                let neg_hi = self.konst((-64.0f32).to_bits());
-                let t = self.sel.op0(Op::Fadd, vec![x, neg_hi]);
-                let c = self.sel.op0(Op::Fstep, vec![t]);
-                let ct = self.sel.op0(Op::Fmul, vec![c, t]);
-                let nct = self.sel.op0(Op::Fneg, vec![ct]);
-                let x = self.sel.op0(Op::Fadd, vec![x, nct]);
-                // lower: x += step(1 - x) * (1 - x); 1.0 = step(dx * dx), as the window has no word left
-                let dd = self.sel.op0(Op::Fmul, vec![d[0], d[0]]);
-                let one = self.sel.op0(Op::Fstep, vec![dd]);
-                let nx = self.sel.op0(Op::Fneg, vec![x]);
-                let t2 = self.sel.op0(Op::Fadd, vec![nx, one]);
-                let c2 = self.sel.op0(Op::Fstep, vec![t2]);
-                let m2 = self.sel.op0(Op::Fmul, vec![c2, t2]);
-                let x = self.sel.op0(Op::Fadd, vec![x, m2]);
-                (x, 0u8)
-            });
+            let size = match self.outs.psize.map(|ps| (ps, self.bits_of(ps.0))) {
+                Some((_, Some(b))) => {
+                    let c = f32::from_bits(b).clamp(1.0, 64.0);
+                    (c != 1.0).then(|| (self.konst(c.to_bits()), 0u8))
+                }
+                Some((ps, None)) => Some({
+                    // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
+                    let x = self.sel.reg(ps).0;
+                    // upper: x -= step(x - 64) * (x - 64)
+                    let neg_hi = self.konst((-64.0f32).to_bits());
+                    let t = self.sel.op0(Op::Fadd, vec![x, neg_hi]);
+                    let c = self.sel.op0(Op::Fstep, vec![t]);
+                    let ct = self.sel.op0(Op::Fmul, vec![c, t]);
+                    let nct = self.sel.op0(Op::Fneg, vec![ct]);
+                    let x = self.sel.op0(Op::Fadd, vec![x, nct]);
+                    // lower: x += step(1 - x) * (1 - x); 1.0 = step(dx * dx), as the window has no word left
+                    let dd = self.sel.op0(Op::Fmul, vec![d[0], d[0]]);
+                    let one = self.sel.op0(Op::Fstep, vec![dd]);
+                    let nx = self.sel.op0(Op::Fneg, vec![x]);
+                    let t2 = self.sel.op0(Op::Fadd, vec![nx, one]);
+                    let c2 = self.sel.op0(Op::Fstep, vec![t2]);
+                    let m2 = self.sel.op0(Op::Fmul, vec![c2, t2]);
+                    let x = self.sel.op0(Op::Fadd, vec![x, m2]);
+                    (x, 0u8)
+                }),
+                None => None,
+            };
             for (k, pc) in [px, py].into_iter().enumerate() {
                 let base = self.sel.reg(pc);
                 let mut off = d[k];
