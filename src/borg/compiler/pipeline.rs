@@ -266,6 +266,17 @@ impl ShaderState {
             if start {
                 near.clear();
             }
+            // A copy of a constant builds it in place.
+            if i.mnem == Op::Ior && i.srcs.len() == 2 && i.srcs[0] == i.srcs[1] && i.swz[0] == i.swz[1] {
+                if let Some(bits) = self.bits_of(i.srcs[0]) {
+                    let v = self.materialize(&mut out, bits);
+                    let last = out.pop().filter(|l| l.dst == v).expect("materialize ends with its result");
+                    (i.mnem, i.srcs, i.swz, i.imm) = (last.mnem, last.srcs, last.swz, last.imm);
+                    built += 1;
+                    out.push(i);
+                    continue;
+                }
+            }
             if let Some((op, x, imm)) = self.imm_op(&i) {
                 (i.mnem, i.srcs, i.swz, i.imm) = (op.into(), vec![x.0], vec![x.1], imm);
                 built += 1;
