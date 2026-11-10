@@ -438,8 +438,16 @@ impl ShaderState {
                             srcs.push(d);
                             swz.push(c);
                         }
+                        let zero = |k: usize| pairs[k].1 == 2 && self.vert.descriptor_defs.contains(&pairs[k].0);
+                        let keep = (srcs.len() == 2 && matches!(alu.op, nir_op_iadd | nir_op_ior | nir_op_ixor))
+                            .then(|| (0..2).find(|&k| zero(1 - k) && !zero(k)))
+                            .flatten()
+                            .map(|k| pairs[k]);
                         self.prod.insert(alu.def.index, (alu.op, pairs));
-                        self.sel.prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz, imm: 0 });
+                        match keep {
+                            Some(v) => { self.sel.vec_map.insert(alu.def.index, vec![v]); }
+                            None => self.sel.prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz, imm: 0 }),
+                        }
                     }
                 }
                 else if !self.skipped.contains(&alu.info().name()) {
