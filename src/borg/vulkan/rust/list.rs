@@ -29,6 +29,9 @@ pub trait Gpu {
     }
     /// Windows 0..n are done.
     fn done(&mut self, _n: u32) {}
+    /// Strip `k` of `n` wrote the boxes of triangles t = k (mod n) below `setup_base`: take the
+    /// other strips' into this one's cache.
+    fn boxes(&mut self, _setup_base: u32, _tris: u32, _k: u32, _n: u32) {}
 }
 
 macro_rules! r {
@@ -578,7 +581,7 @@ impl Builder {
                 g.reg(reg, a);
             }
         }
-        g.op(&[TILES, fb_tiles, self.fb_h >> 2, tw, th]);
+        g.op(&[TILES, fb_tiles, self.fb_h >> 2, tw, th, self.list.tris, self.setup_base]);
         g.reg(r!(render_list), 0);
     }
 
@@ -865,14 +868,26 @@ impl Prog {
                 }
                 TILES => {
                     let (fb_tiles, fb_rows, tw, th) = (w(i + 1), w(i + 2), w(i + 3), w(i + 4));
+                    let (tris, setup_base) = (w(i + 5), w(i + 6));
                     let (y0, rows) = if n > 1 { (k * per, per.min(fb_rows.saturating_sub(k * per))) } else { (0, fb_rows) };
+                    // Strips share the boxes: each runs the vertex shaders of every n-th triangle
+                    // (mode 3, one tile row, nothing binned), then every window skips what misses it.
+                    let shared = n > 1 && tris > 0;
+                    if shared {
+                        g.reg(r!(seq_tile_rows), 1 | 3 << 12 | k << 16 | n << 21);
+                        g.reg(r!(fb_origin), y0 << 16);
+                        g.reg(r!(seq_trigger), 1);
+                        g.wait(r!(status), STATUS_REG_T__SEQ_BUSY_bm, 0);
+                        g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
+                        g.boxes(setup_base, tris, k, n);
+                    }
                     // More than one window: the first writes the box cache, the others skip what misses them.
                     let many = rows.div_ceil(th.max(1)) * fb_tiles.div_ceil(tw.max(1)) > 1;
-                    let mut box_mode = if many { 1 } else { 0 };
+                    let mut box_mode = if shared { 2 } else if many { 1 } else { 0 };
                     for wy in (y0..y0 + rows).step_by(th.max(1) as usize) {
                         for wx in (0..fb_tiles).step_by(tw.max(1) as usize) {
                             let mode = box_mode;
-                            box_mode = if many { 2 } else { 0 };
+                            box_mode = if shared || many { 2 } else { 0 };
                             win += 1;
                             if g.skip(win - 1) {
                                 continue;
@@ -887,7 +902,7 @@ impl Prog {
                         }
                     }
                     g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
-                    i += 5;
+                    i += 7;
                 }
                 OCC_BEGIN => {
                     (occ, queries) = (0, true);

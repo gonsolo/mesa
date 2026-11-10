@@ -553,6 +553,8 @@ struct Raw<'a> {
     ckpt: Option<(u64, u64)>,                        // the pass whose windows are checkpointed
     resume: Option<(u32, Vec<CachedPage>)>,          // windows done and their pages
     last: std::time::Instant,
+    peers: &'a [usize],                              // every strip's memory, for the shared boxes
+    barrier: &'a std::sync::Barrier,
 }
 
 impl Raw<'_> {
@@ -633,6 +635,20 @@ impl crate::list::Gpu for Raw<'_> {
         }
     }
 
+    // Every strip waits here, even one that failed, so none waits forever.
+    fn boxes(&mut self, setup_base: u32, tris: u32, k: u32, n: u32) {
+        self.barrier.wait();
+        let tris = tris.min(setup_base / 4 - 1);
+        if !self.ok || setup_base as usize > MEM_BYTES || self.peers.len() != n as usize {
+            return;
+        }
+        let own = self.peers[k as usize] as *mut u32;
+        for t in (0..tris).filter(|t| t % n != k) {
+            let at = (setup_base / 4 - 1 - t) as usize;
+            unsafe { own.add(at).write_volatile((self.peers[(t % n) as usize] as *const u32).add(at).read_volatile()) };
+        }
+    }
+
     fn done(&mut self, n: u32) {
         let Some(key) = self.ckpt else { return };
         if self.last.elapsed().as_secs() < CKPT_SECS {
@@ -655,6 +671,9 @@ fn run_all(servers: &mut [Server], prog: &Prog, rows_per: u32, key: Option<(u64,
     let np = servers.len() as u32;
     let ckpt = key.filter(|_| np == 1);
     let mut resume = resume.filter(|_| np == 1);
+    let peers: Vec<usize> = servers.iter().map(|s| s.mem as usize).collect();
+    let barrier = std::sync::Barrier::new(servers.len());
+    let (peers, barrier) = (&peers[..], &barrier);
     std::thread::scope(|sc| {
         let runs: Vec<_> = servers
             .iter_mut()
@@ -662,7 +681,8 @@ fn run_all(servers: &mut [Server], prog: &Prog, rows_per: u32, key: Option<(u64,
             .map(|(k, s)| {
                 let resume = resume.take();
                 sc.spawn(move || {
-                    let mut g = Raw { s, regs: Vec::new(), n: 0, ok: true, pages: key.map(|_| Default::default()), ckpt, resume, last: std::time::Instant::now() };
+                    let mut g = Raw { s, regs: Vec::new(), n: 0, ok: true, pages: key.map(|_| Default::default()), ckpt, resume,
+                                      last: std::time::Instant::now(), peers, barrier };
                     prog.run(&mut g, (k as u32, np, rows_per));
                     g.send();
                     let mut sync = [0u8];
