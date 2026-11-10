@@ -1,7 +1,7 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 use crate::opcodes::{Op, CSR_UNIFORM0};
-use crate::state::ShaderState;
+use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc, Mnem};
 use crate::{HashMap, HashSet};
 
@@ -127,9 +127,12 @@ impl ShaderState {
             .into_iter()
             .collect();
         need.sort();
+        let mut front = Vec::new();
         for d in need {
             let (v, c) = match self.sel.vec_map.get(&d) {
                 Some(_) => crate::resolve_vm(&self.sel.vec_map, d, 0),
+                // A vertex shader's konst(0) is built where selection stands: here, after the uses.
+                None if self.consts[&d] == 0 && self.stage == Stage::Vertex => (self.materialize(&mut front, 0), 0),
                 None => (self.konst(self.consts[&d]), 0),
             };
             for ins in self.sel.prog.iter_mut() {
@@ -140,5 +143,6 @@ impl ShaderState {
                 }
             }
         }
+        self.sel.prog.splice(0..0, front);
     }
 }
