@@ -266,6 +266,10 @@ impl ShaderState {
             if start {
                 near.clear();
             }
+            if let Some((op, x, imm)) = self.imm_op(&i) {
+                (i.mnem, i.srcs, i.swz, i.imm) = (op.into(), vec![x.0], vec![x.1], imm);
+                built += 1;
+            }
             for k in 0..i.srcs.len() {
                 if k == 2 && i.mnem == Op::Tex {
                     continue;
@@ -288,6 +292,37 @@ impl ShaderState {
         debug!("borgc: {built} constant operand(s) by immediates");
         self.sel.prog = out;
         self.prune_window();
+    }
+
+    /// The RISC-V immediate form of an integer op with one small constant operand.
+    fn imm_op(&self, i: &BorgInstr) -> Option<(Op, (u32, u8), u32)> {
+        let Mnem::Op(op) = i.mnem else { return None };
+        if i.srcs.len() != 2 {
+            return None;
+        }
+        let small = |b: u32| ((b as i32) >= -2048 && (b as i32) < 2048).then_some(b & 0xFFF);
+        let reg = |k: usize| (self.bits_of(i.srcs[k]).is_none() && !matches!(self.sel.loc.get(&i.srcs[k]), Some(Loc::Uniform(_))))
+            .then_some((i.srcs[k], i.swz[k]));
+        let (kb, ka) = (self.bits_of(i.srcs[1]), self.bits_of(i.srcs[0]));
+        let either = |imm: Op| match (ka, kb) {
+            (None, Some(b)) => Some((imm, reg(0)?, small(b)?)),
+            (Some(a), None) => Some((imm, reg(1)?, small(a)?)),
+            _ => None,
+        };
+        let right = |imm: Op, v: Option<u32>| Some((imm, reg(0)?, v?)).filter(|_| ka.is_none());
+        match op {
+            Op::Iadd => either(Op::Addi),
+            Op::Iand => either(Op::Andi),
+            Op::Ior => either(Op::Ori),
+            Op::Ixor => either(Op::Xori),
+            Op::Isub => right(Op::Addi, kb.and_then(|b| small(b.wrapping_neg()))),
+            Op::Ishl => right(Op::Slli, kb.map(|b| b & 31)),
+            Op::Isrl => right(Op::Srli, kb.map(|b| b & 31)),
+            Op::Ishr => right(Op::Srai, kb.map(|b| b & 31)),
+            Op::Islt => right(Op::Slti, kb.and_then(small)),
+            Op::Isltu => right(Op::Sltiu, kb.and_then(small)),
+            _ => None,
+        }
     }
 
     /// `rd = rs + k` without a new constant: ADDI, or LUI and ADDI and ADD.
@@ -493,6 +528,9 @@ impl ShaderState {
                     if let Some(k) = self.bits_of(i.srcs[1]) {
                         plus.insert(i.dst, (i.srcs[0], k));
                     }
+                }
+                Mnem::Op(Op::Addi) if i.swz == [0] && i.srcs[0] != d => {
+                    plus.insert(i.dst, (i.srcs[0], ((i.imm << 20) as i32 >> 20) as u32));
                 }
                 Mnem::Op(op @ (Op::Load | Op::Store)) => {
                     let (a, c) = (i.srcs[0], i.swz[0]);

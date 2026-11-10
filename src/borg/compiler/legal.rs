@@ -17,7 +17,8 @@ pub(crate) struct Operands {
 /// RISC-V forms with an immediate: no window operand, and r0 is x0 there.
 pub(crate) fn imm_form(m: Mnem) -> Option<Op> {
     match m {
-        Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Sws | Op::Slli | Op::Srli | Op::Srai | Op::Addi | Op::Andi | Op::Xori | Op::Sltiu | Op::Lui | Op::Csrrs)) => Some(op),
+        Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Sws | Op::Slli | Op::Srli | Op::Srai | Op::Addi | Op::Andi | Op::Ori | Op::Xori | Op::Slti | Op::Sltiu | Op::Lui
+            | Op::Csrrs)) => Some(op),
         _ => None,
     }
 }

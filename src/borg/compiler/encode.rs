@@ -98,7 +98,7 @@ pub(crate) fn encode_imm(op: Op, rd: u8, rs1: u8, rs2: u8, imm: u32) -> Option<u
         Op::Lw => Fields { rd, rs1, imm12: imm, ..Default::default() },
         Op::Sw | Op::Sws => Fields { rs1, rs2, simm: imm, ..Default::default() },
         Op::Slli | Op::Srli | Op::Srai => Fields { rd, rs1, shamtw: imm, ..Default::default() },
-        Op::Addi | Op::Andi | Op::Xori | Op::Sltiu => Fields { rd, rs1, imm12: imm, ..Default::default() },
+        Op::Addi | Op::Andi | Op::Ori | Op::Xori | Op::Slti | Op::Sltiu => Fields { rd, rs1, imm12: imm, ..Default::default() },
         Op::Lui => Fields { rd, imm20: imm, ..Default::default() },
         Op::Csrrs => Fields { rd, csr: imm, ..Default::default() },
         _ => return None,
