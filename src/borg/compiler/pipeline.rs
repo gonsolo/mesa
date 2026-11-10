@@ -300,10 +300,7 @@ impl ShaderState {
             out.push(BorgInstr { mnem: Op::Addi.into(), dst: d, srcs: vec![rs], swz: vec![0], imm: k });
             return d;
         }
-        let (hi, lo) = (k.wrapping_add(0x800) >> 12, k & 0xFFF);
-        let (u, v) = (self.sel.fresh(), self.sel.fresh());
-        out.push(BorgInstr { mnem: Op::Lui.into(), dst: u, srcs: vec![], swz: vec![], imm: hi & 0xF_FFFF });
-        out.push(BorgInstr { mnem: Op::Addi.into(), dst: v, srcs: vec![u], swz: vec![0], imm: lo });
+        let v = self.materialize(out, k);
         out.push(BorgInstr { mnem: Op::Add.into(), dst: d, srcs: vec![rs, v], swz: vec![0, 0], imm: 0 });
         d
     }
@@ -480,10 +477,12 @@ impl ShaderState {
         };
         let mut byte: HashMap<u32, (u32, u32)> = HashMap::default();
         let mut plus: HashMap<u32, (u32, u32)> = HashMap::default();
+        let mut far: HashMap<u32, u32> = HashMap::default();   // root + a 2 KB step, for constant words out of reach
         for (start, mut i) in block_starts(std::mem::take(&mut self.sel.prog)) {
             if start {
                 byte.clear();
                 plus.clear();
+                far.clear();
             }
             // Not every value is written once: what was formed from a rewritten one is stale.
             let d = i.dst;
@@ -499,7 +498,15 @@ impl ShaderState {
                     let (a, c) = (i.srcs[0], i.swz[0]);
                     let near = |b: (u32, u32), k: u32| Some((b.0, b.1.wrapping_add(k.wrapping_mul(4)))).filter(|&(_, o)| o < 2048);
                     let at = match (self.bits_of(a), plus.get(&a).and_then(|&(x, k)| byte.get(&x).map(|&b| (b, k)))) {
-                        (Some(k), _) if c == 0 => near((root, 0), k),
+                        (Some(k), _) if c == 0 => near((root, 0), k).or_else(|| {
+                            let (b, o) = (k.wrapping_mul(4) & !0x7FF, k.wrapping_mul(4) & 0x7FF);
+                            let u = match far.get(&b) {
+                                Some(&u) => u,
+                                None => self.add_const(&mut out, root, b),
+                            };
+                            far.insert(b, u);
+                            Some((u, o))
+                        }),
                         (None, Some((b, k))) if c == 0 => near(b, k),
                         _ => None,
                     };
