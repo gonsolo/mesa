@@ -437,8 +437,8 @@ impl Builder {
         (self.sh[stage].code, self.sh[stage].consts) = (a, c);
     }
 
-    fn setup_room_tris(&self) -> u32 {
-        ((BORG_HEAP_SPI - self.setup_base) / TBR_SETUP_ENTRY_BYTES).min(LIST_MAX_TRIS)
+    fn setup_room_tris(&self, shift: u32) -> u32 {
+        (BORG_HEAP_SPI.saturating_sub(self.setup_base) >> shift).min(LIST_MAX_TRIS)
     }
 
     fn list_reset(&mut self) {
@@ -449,8 +449,22 @@ impl Builder {
         self.push_at = 0;
     }
 
-    /// Queues the draw the last `Cmd::Draw` described.
+    /// Queues the draw the last `Cmd::Draw` described; a list draw larger than the setup records'
+    /// room goes in parts.
     pub fn draw(&mut self, g: &mut Prog) {
+        let (n, dp, bias) = (self.vertex_count, self.dp, self.bias);
+        let room = self.vert.as_ref().and_then(|v| record_shift(v.varyings)).map_or(0, |s| self.setup_room_tris(s) / 3 * 3);
+        if dp.topology != 0 || dp.index_type != 0 || dp.instance_count > 1 || room == 0 || n <= room {
+            return self.draw_part(g);
+        }
+        for first in (0..n).step_by(room as usize) {
+            (self.vertex_count, self.dp.first_vertex, self.bias) = (room.min(n - first), dp.first_vertex + first, bias);
+            self.draw_part(g);
+        }
+        (self.vertex_count, self.dp) = (n, dp);
+    }
+
+    fn draw_part(&mut self, g: &mut Prog) {
         let (bias_c, bias_s) = (self.bias[0], self.bias[1]);
         self.bias = [0; 2];
         let Some(shift) = self.vert.as_ref().and_then(|v| record_shift(v.varyings)) else { return };
@@ -459,7 +473,7 @@ impl Builder {
         }
         let tris = self.vertex_count * self.dp.instance_count.max(1);
         let l = &self.list;
-        if l.n != 0 && (shift != l.shift || l.tris + tris > self.setup_room_tris() || l.n >= BORG_LIST_ENTRY_BYTES / 8 - 1 || l.top + 0x4000 > BORG_LIST_BYTES) {
+        if l.n != 0 && (shift != l.shift || l.tris + tris > self.setup_room_tris(shift) || l.n >= BORG_LIST_ENTRY_BYTES / 8 - 1 || l.top + 0x4000 > BORG_LIST_BYTES) {
             self.flush(g);
         }
         if self.push_used && self.push_at == 0 {
