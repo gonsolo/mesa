@@ -1024,7 +1024,7 @@ impl Ctx<'_> {
 
     fn emit(&self) {
         let (p, pl) = (self.p, self.pl);
-        let bits = self.load << 1 | (pl.push_stage as u32) << 5;
+        let bits = self.load << 1 | (pl.push_stage as u32) << 5 | (self.points as u32) << 7;
         let d = if self.lines {
             let words = [self.pairs.len() as u32 * 6, p.instances, 0, p.first_instance, 0, 0, self.ubo_base, self.table];
             Draw { topology: 0, index_type: 0, restart: bits, words }
