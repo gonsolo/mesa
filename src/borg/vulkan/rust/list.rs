@@ -187,6 +187,8 @@ struct DrawParams {
     /// The draw's buffer binding table: base address and offset limit per binding (borgc).
     table: u32,
     push_stage: u32,
+    /// Points: the setup ROM's point path (DRAW_CFG bit 10).
+    points: u32,
     vertex_offset: i32,
 }
 
@@ -542,7 +544,7 @@ impl Builder {
             }
         }
         let dp = self.dp;
-        st.push([r!(draw_cfg), 1 | dp.topology << 1 | dp.index_type << 3 | dp.restart << 5 | shift << 6]);
+        st.push([r!(draw_cfg), 1 | dp.topology << 1 | dp.index_type << 3 | dp.restart << 5 | shift << 6 | dp.points << 10]);
         if self.list.state_addr == 0 || self.list.state != st || self.list.table != dp.table {
             (self.list.state, self.list.table) = (st.clone(), dp.table);
             let at = self.alloc(16);
@@ -747,7 +749,7 @@ impl Builder {
                 g.reg(r!(desc_flush), 0);
             }
             Cmd::Draw(d) => {
-                if d.topology > 2 || d.index_type > 2 || d.restart > 127 {
+                if d.topology > 2 || d.index_type > 2 || d.restart > 255 {
                     return false;
                 }
                 let (p3, w) = (d.restart, d.words);
@@ -758,6 +760,7 @@ impl Builder {
                     restart: p3 & 1,
                     load: if load == 1 { 9 } else { load },
                     push_stage: p3 >> 5 & 3,
+                    points: p3 >> 7 & 1,
                     instance_count: w[1],
                     first_vertex: w[2],
                     first_instance: w[3],

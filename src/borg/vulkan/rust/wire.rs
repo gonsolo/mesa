@@ -109,7 +109,7 @@ pub fn send_vattr(slot: u32, fmt: u32, base: u32, count: u32, stride: u32, swz: 
     emit(Cmd::Vattr([slot, fmt, base, count, stride, swz]));
 }
 
-/// A draw: topology, index type, the restart, load and push-stage bits, and its words.
+/// A draw: topology, index type, the restart, load, push-stage and point bits, and its words.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Draw {
     pub topology: u32,
