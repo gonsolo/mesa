@@ -221,6 +221,11 @@ impl crate::list::Gpu for Dev {
             if v & mask == val || !self.ok {
                 return v;
             }
+            if crate::hw::env_set("BORGVK_PERF") {
+                // A long run, every 200M cycles: total, frag, flush, stall, dma so far.
+                let p: Vec<u32> = (0..5).map(|j| self.read(std::mem::offset_of!(borg_gpu_t, perf_total) as u32 + 4 * j)).collect();
+                eprintln!("[perf] waiting {p:?}");
+            }
         }
     }
 

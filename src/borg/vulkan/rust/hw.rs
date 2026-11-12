@@ -6,7 +6,7 @@
 use crate::ffi::*;
 use crate::list::Gpu;
 
-fn env_set(name: &str) -> bool {
+pub(crate) fn env_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
 }
 

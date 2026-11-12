@@ -911,8 +911,14 @@ impl Prog {
                             }
                             g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(th) | mode << 12);
                             g.reg(r!(fb_origin), wx | wy << 16);
+                            let t0 = std::time::Instant::now();
                             g.reg(r!(seq_trigger), 1);
                             g.wait(r!(status), STATUS_REG_T__SEQ_BUSY_bm, 0);
+                            if crate::hw::env_set("BORGVK_PERF") {
+                                // total, frag, flush, stall, dma (32 bits: the time covers a wrap)
+                                let p: Vec<u32> = (0..5).map(|j| g.read(r!(perf_total) + 4 * j)).collect();
+                                eprintln!("[perf] win {win} at {wx},{wy} mode {mode} {:?} ms {}", p, t0.elapsed().as_millis());
+                            }
                             if !queries {
                                 g.done(win);
                             }
