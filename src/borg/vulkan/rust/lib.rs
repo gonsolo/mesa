@@ -43,6 +43,7 @@ mod record;
 mod queue;
 mod render;
 mod sampler;
+mod scanout;
 mod shader_cache;
 mod state_upload;
 mod sim;

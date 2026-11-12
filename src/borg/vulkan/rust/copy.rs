@@ -290,6 +290,10 @@ fn buffer_image_copies(img: &Image, buf: &Buffer, regions: &[BufferRegion], to_b
     for r in regions {
         buffer_image(img, buf, r, to_buffer);
     }
+    if to_buffer && crate::hw::enabled() && regions.len() == 1 && regions[0].offset == [0; 3] {
+        let r = &regions[0];
+        crate::scanout::copied(img, r.row_length, r.extent, |n| bh.with_bytes(r.buffer_offset as usize, n, |b| b.to_vec()));
+    }
     if to_buffer && borgvk_corpus_on() {
         let key = hash(BORGVK_CORPUS_SEED, &img.vk.format.to_ne_bytes());
         let key = hash(key, unsafe { std::slice::from_raw_parts(regions.as_ptr().cast(), size_of_val(regions)) });
