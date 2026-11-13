@@ -98,7 +98,10 @@ impl Dev {
 
     fn ioctl<T>(&mut self, request: u64, arg: &mut T) {
         if let Link::Drm(fd) = self.link {
-            self.ok &= drm::ioctl(fd, request, arg);
+            if !drm::ioctl(fd, request, arg) && self.ok {
+                eprintln!("borgvk: DRM ioctl {request:#x}: {}", std::io::Error::last_os_error());
+                self.ok = false;
+            }
         }
     }
 
@@ -199,9 +202,10 @@ impl crate::list::Gpu for Dev {
     /// never comes.
     fn wait(&mut self, off: u32, mask: u32, val: u32) -> u32 {
         if matches!(self.link, Link::Drm(_)) {
+            // A failed ioctl ends the wait, as a lost simulator does.
             loop {
                 let v = self.read(off);
-                if v & mask == val {
+                if v & mask == val || !self.ok {
                     return v;
                 }
             }
