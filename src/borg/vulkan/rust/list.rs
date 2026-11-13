@@ -894,7 +894,8 @@ impl Prog {
                         g.reg(r!(seq_tile_rows), 1 | 3 << 12 | k << 16 | n << 21);
                         g.reg(r!(fb_origin), y0 << 16);
                         g.reg(r!(seq_trigger), 1);
-                        g.wait(r!(status), STATUS_REG_T__SEQ_BUSY_bm, 0);
+                        // The trigger reads back done; busy might not be set yet when a fast CPU polls.
+                        g.wait(r!(seq_trigger), 1, 1);
                         g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
                         g.boxes(setup_base, tris, k, n);
                     }
@@ -913,7 +914,7 @@ impl Prog {
                             g.reg(r!(fb_origin), wx | wy << 16);
                             let t0 = std::time::Instant::now();
                             g.reg(r!(seq_trigger), 1);
-                            g.wait(r!(status), STATUS_REG_T__SEQ_BUSY_bm, 0);
+                            g.wait(r!(seq_trigger), 1, 1);
                             if crate::hw::env_set("BORGVK_PERF") {
                                 // total, frag, flush, stall, dma (32 bits: the time covers a wrap)
                                 let p: Vec<u32> = (0..5).map(|j| g.read(r!(perf_total) + 4 * j)).collect();
