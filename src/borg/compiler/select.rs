@@ -434,7 +434,13 @@ impl ShaderState {
                                 resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
                             pairs.push((d, c));
                             // A descriptor's offset (.z) is 0: the driver places each binding at its slot's start.
-                            let (d, c) = if c == 2 && self.vert.descriptor_defs.contains(&d) { (self.konst(0), 0) } else { (d, c) };
+                            let (d, c) = if c == 2 && self.vert.descriptor_defs.contains(&d) {
+                                (self.konst(0), 0)
+                            } else if let Some(bits) = self.scalar_const(d) {
+                                (self.konst(bits), 0)
+                            } else {
+                                (d, c)
+                            };
                             srcs.push(d);
                             swz.push(c);
                         }
