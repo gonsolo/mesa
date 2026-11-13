@@ -917,7 +917,10 @@ impl Prog {
                             if crate::hw::env_set("BORGVK_PERF") {
                                 // total, frag, flush, stall, dma (32 bits: the time covers a wrap)
                                 let p: Vec<u32> = (0..5).map(|j| g.read(r!(perf_total) + 4 * j)).collect();
-                                eprintln!("[perf] win {win} at {wx},{wy} mode {mode} {:?} ms {}", p, t0.elapsed().as_millis());
+                                // issued, waits (reg, branch, drain, empty, unit), drains, then issued/active per
+                                // program: fragment, vertex or compute, setup, raster
+                                let q: Vec<u32> = (0..15).map(|j| { g.reg(r!(perf_issue), j); g.read(r!(perf_issue)) }).collect();
+                                eprintln!("[perf] win {win} at {wx},{wy} mode {mode} {:?} ms {} issue {:?}", p, t0.elapsed().as_millis(), q);
                             }
                             if !queries {
                                 g.done(win);
