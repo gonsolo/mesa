@@ -802,7 +802,7 @@ endif
 allow_fallback_for_libdrm = get_option('allow-fallback-for').contains('libdrm')
 
 with_gallium_drisw_kms = false
-if system_has_kms_drm and not get_option('borg-without-libdrm')
+if system_has_kms_drm
   dep_libdrm = dependency(
     'libdrm', version : '>=' + _drm_ver,
     required : with_dri2 or with_dri or with_gbm,
