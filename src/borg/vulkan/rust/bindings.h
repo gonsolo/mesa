@@ -31,7 +31,7 @@
 #include "util/list.h"
 #include "util/os_time.h"
 #include "drm-uapi/borg_drm.h"
-#include "borgvk_drm_compat.h"
+#include <xf86drm.h>
 
 #include "out/hardware/borg/rdl/borg_layout.h"
 #include "out/hardware/borg/rdl/borg_regs.h"

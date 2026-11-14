@@ -940,13 +940,6 @@ option(
 )
 
 option(
-  'borg-without-libdrm',
-  type : 'boolean',
-  value : false,
-  description : 'Build without libdrm (borgvk on the board talks to its render node with plain ioctls)',
-)
-
-option(
   'borg-app-objects',
   type : 'array',
   value : [],
