@@ -130,6 +130,10 @@ static INSTANCE_EXTENSIONS: LazyLock<vk_instance_extension_table> = LazyLock::ne
     {
         e.KHR_wayland_surface = true;
     }
+    #[cfg(vk_display)]
+    {
+        e.KHR_display = true;
+    }
     t
 });
 
@@ -286,7 +290,10 @@ entrypoint! {
             return vk_error!(pdev, r).0;
         }
         let mut d = d.then(|d| vk_device_finish(&mut d.vk));
-        vk_device_enable_threaded_submit(&mut d.vk);
+        // With a display, a submit is done when it returns: a present's blit before its flip.
+        if pdev.display_fd < 0 {
+            vk_device_enable_threaded_submit(&mut d.vk);
+        }
         d.vk.command_dispatch_table = &raw const d.cmd_dispatch;
         d.vk.command_buffer_ops = &CMD_BUFFER_OPS;
         let r = vk_queue_init(&mut d.queue, &mut d.vk, (*info).pQueueCreateInfos, 0);

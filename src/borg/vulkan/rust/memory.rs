@@ -162,9 +162,10 @@ impl Default for DeviceMemory {
     }
 }
 
-/// Backing for `size` bytes and its GEM handle, 0 for malloc'd memory.
-fn back(dev: &Device, size: usize) -> Result<(*mut c_void, u32, u32), VkResult> {
-    if let Some(h) = crate::heap::get() {
+/// Backing for `size` bytes and its GEM handle, 0 for malloc'd memory; a GEM object for a dma-buf
+/// export.
+fn back(dev: &Device, size: usize, export: bool) -> Result<(*mut c_void, u32, u32), VkResult> {
+    if let Some(h) = crate::heap::get().filter(|_| !export) {
         let (map, gpu) = h.alloc(size).ok_or(VK_ERROR_OUT_OF_DEVICE_MEMORY)?;
         return Ok((map.cast(), 0, gpu));
     }
@@ -190,7 +191,7 @@ fn back(dev: &Device, size: usize) -> Result<(*mut c_void, u32, u32), VkResult> 
     Ok((map, create.handle, 0))
 }
 
-pointee!(VkMemoryAllocateInfo, VkMemoryMapInfo, VkBufferCreateInfo, VkBufferViewCreateInfo, VkDeviceBufferMemoryRequirements, VkMemoryRequirements2, *mut c_void);
+pointee!(VkMemoryAllocateInfo, VkMemoryGetFdInfoKHR, VkMemoryFdPropertiesKHR, VkMemoryMapInfo, VkBufferCreateInfo, VkBufferViewCreateInfo, VkDeviceBufferMemoryRequirements, VkMemoryRequirements2, *mut c_void);
 
 entrypoint! {
     fn borgvk_AllocateMemory(device: &Device, info: &VkMemoryAllocateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkDeviceMemory) -> Result<(), VkError> {
@@ -198,7 +199,11 @@ entrypoint! {
         let mem = mem.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
         let mut mem = Owned::new(mem, |m| unsafe { vk_device_memory_destroy(device.vk_ptr(), alloc, &mut m.vk) });
         let size = (info.allocationSize as usize).max(1);
-        let (map, gem_handle, gpu) = back(device, size).map_err(|r| vk_error!(device, r))?;
+        let export = unsafe { chain(info.pNext.cast_mut()) }.any(|s| unsafe {
+            (*s).sType == VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO
+                && (*s.cast::<VkExportMemoryAllocateInfo>()).handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT != 0
+        });
+        let (map, gem_handle, gpu) = back(device, size, export).map_err(|r| vk_error!(device, r))?;
         (mem.map, mem.size, mem.gem_handle, mem.gpu) = (map, size, gem_handle, gpu);
         *out = VkDeviceMemory::from_object(mem.keep());
         Ok(())
@@ -219,6 +224,24 @@ entrypoint! {
             }
             vk_device_memory_destroy(device.vk_ptr(), alloc, &mut mem.vk);
         }
+    }
+}
+
+entrypoint! {
+    fn borgvk_GetMemoryFdKHR(device: &Device, info: &VkMemoryGetFdInfoKHR, fd: &mut i32) -> VkResult {
+        let mem = unsafe { info.memory.get() }.unwrap();
+        const RDWR_CLOEXEC: u32 = 0o2 | 0o2000000; // DRM_RDWR | DRM_CLOEXEC
+        if mem.gem_handle == 0 || unsafe { drmPrimeHandleToFD(device.drm_fd, mem.gem_handle, RDWR_CLOEXEC, fd) } != 0 {
+            return VK_ERROR_TOO_MANY_OBJECTS;
+        }
+        VK_SUCCESS
+    }
+}
+
+// Memory is only exported, never imported.
+entrypoint! {
+    fn borgvk_GetMemoryFdPropertiesKHR(_device: VkDevice, _handle_type: VkExternalMemoryHandleTypeFlagBits, _fd: i32, _props: &mut VkMemoryFdPropertiesKHR) -> VkResult {
+        VK_ERROR_INVALID_EXTERNAL_HANDLE
     }
 }
 
