@@ -105,7 +105,8 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-function', 'util_format_(is_scaled|get_first_non_void_channel|is_pure_(integer|uint|sint))|vk_format_has_(depth|stencil)|util_format_has_alpha|util_format_is_compressed|util_format_unpack_rgba_rect|calloc',
     '--allowlist-type', 'VkClear(ColorValue|DepthStencilValue|Value|Attachment|Rect)|VkImageSubresourceRange|util_format_type',
     '--allowlist-var', 'VK_REMAINING_(MIP_LEVELS|ARRAY_LAYERS)',
-    '--allowlist-function', 'wsi_device_(init|finish)|vk_instance_get_proc_addr_unchecked|vk_alloc2',
+    '--allowlist-function', 'wsi_device_(init|finish)|vk_instance_get_proc_addr_unchecked|vk_alloc2|drmPrimeHandleToFD',
+    '--allowlist-type', 'VkMemoryGetFdInfoKHR|VkMemoryFdPropertiesKHR|VkExportMemoryAllocateInfo|VkExternalMemoryFeatureFlagBits',
     '--allowlist-type', 'vk_physical_device|wsi_device|vk_instance|wsi_device_options|VkIcdSurfaceHeadless|VkSurfaceKHR|VkInstance',
     '--allowlist-function', 'vk_cmd_queue_execute|vk_sync_(wait|signal)',
     '--allowlist-type', 'vk_queue|vk_queue_submit|vk_cmd_queue_entry',
@@ -169,6 +170,9 @@ if with_platform_x11
 endif
 if with_platform_wayland
   borgvk_rs_args += ['--cfg', 'vk_wayland']
+endif
+if system_has_kms_drm and dep_libdrm.found()
+  borgvk_rs_args += ['--cfg', 'vk_display']
 endif
 borgvk_rs_link = [_libborgvk_bindings_rs, libborg_layout]
 borgvk_rs_deps = []

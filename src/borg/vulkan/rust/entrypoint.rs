@@ -200,7 +200,7 @@ macro_rules! pointee {
     };
 }
 pub(crate) use pointee;
-pointee!(u32, u64);
+pointee!(u32, u64, i32);
 
 /// An entry point the dispatch table calls by name. `fn` converts the parameters at the
 /// boundary (see `Param`) and runs a safe body; `unsafe fn` takes them raw, its body in an

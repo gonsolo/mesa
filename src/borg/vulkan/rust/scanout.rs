@@ -7,7 +7,7 @@ use crate::entrypoint::entrypoint;
 use crate::ffi::*;
 use crate::image::Image;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 struct Frame {
     w: u32,
@@ -19,13 +19,15 @@ struct Frame {
 
 static LAST: Mutex<Option<Frame>> = Mutex::new(None);
 static FRONT: AtomicU32 = AtomicU32::new(0);
+/// KMS shows the frames (VK_KHR_display): the board's own scan-out stays off.
+pub static KMS: AtomicBool = AtomicBool::new(false);
 
 /// A whole BGRA8 or RGBA8 image copied to a buffer: what a present shows, if one follows.
 pub fn copied(img: &Image, row_length: u32, extent: [u32; 3], bytes: impl FnOnce(usize) -> Option<Vec<u8>>) {
     let bgra = matches!(img.vk.format, VK_FORMAT_B8G8R8A8_UNORM | VK_FORMAT_B8G8R8A8_SRGB);
     let rgba = matches!(img.vk.format, VK_FORMAT_R8G8B8A8_UNORM | VK_FORMAT_R8G8B8A8_SRGB);
     let e = img.vk.extent;
-    if !(bgra || rgba) || extent != [e.width, e.height, 1] {
+    if !(bgra || rgba) || extent != [e.width, e.height, 1] || KMS.load(Ordering::Relaxed) {
         return;
     }
     let pitch = row_length.max(e.width) * 4;

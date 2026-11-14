@@ -24,6 +24,8 @@ pub struct PhysicalDevice {
     pub memory: VkPhysicalDeviceMemoryProperties,
     pub sync_types: [*const vk_sync_type; 2],
     pub drm_fd: i32,
+    /// The DRM primary node, for VK_KHR_display; -1 without one.
+    pub display_fd: i32,
     pub wsi_device: wsi_device,
 }
 
@@ -188,7 +190,7 @@ fn format_properties(f: VkFormat) -> VkFormatProperties {
     VkFormatProperties { linearTilingFeatures: lin, optimalTilingFeatures: opt, bufferFeatures: buf }
 }
 
-pointee!(VkFormatProperties2, VkPhysicalDeviceImageFormatInfo2, VkImageFormatProperties2, VkExternalBufferProperties, VkQueueFamilyProperties2, VkPhysicalDeviceMemoryProperties2);
+pointee!(VkFormatProperties2, VkPhysicalDeviceImageFormatInfo2, VkImageFormatProperties2, VkPhysicalDeviceExternalBufferInfo, VkExternalBufferProperties, VkQueueFamilyProperties2, VkPhysicalDeviceMemoryProperties2);
 
 entrypoint! {
     fn borgvk_GetPhysicalDeviceFormatProperties2(_pd: VkPhysicalDevice, format: VkFormat, props: &mut VkFormatProperties2) {
@@ -265,8 +267,18 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_GetPhysicalDeviceExternalBufferProperties(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceExternalBufferInfo, props: &mut VkExternalBufferProperties) {
-        props.externalMemoryProperties = Default::default();
+    fn borgvk_GetPhysicalDeviceExternalBufferProperties(pd: &PhysicalDevice, info: &VkPhysicalDeviceExternalBufferInfo, props: &mut VkExternalBufferProperties) {
+        // A dma-buf export, for the display WSI's blit buffers.
+        let dma_buf = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+        props.externalMemoryProperties = if pd.display_fd >= 0 && info.handleType == dma_buf {
+            VkExternalMemoryProperties {
+                externalMemoryFeatures: VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT,
+                exportFromImportedHandleTypes: dma_buf,
+                compatibleHandleTypes: dma_buf,
+            }
+        } else {
+            Default::default()
+        };
     }
 }
 
@@ -368,6 +380,7 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     let ialloc: *const VkAllocationCallbacks = &instance.vk.alloc;
     let mut d = Owned::new(d, |d| unsafe { vk_free(ialloc, std::ptr::from_mut(d).cast()) });
     d.drm_fd = drm_fd;
+    d.display_fd = if drm_fd >= 0 && cfg!(vk_display) { find_borg_node("card", 0..64) } else { -1 };
     let mut dispatch: vk_physical_device_dispatch_table = unsafe { std::mem::zeroed() };
     let mut extensions: vk_device_extension_table = unsafe { std::mem::zeroed() };
     let mut features: vk_features = unsafe { std::mem::zeroed() };
@@ -375,6 +388,11 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
         vk_physical_device_dispatch_table_from_entrypoints(&mut dispatch, &borgvk_physical_device_entrypoints, true);
         vk_physical_device_dispatch_table_from_entrypoints(&mut dispatch, &wsi_physical_device_entrypoints, false);
         extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_swapchain = true;
+        if d.display_fd >= 0 {
+            extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_external_memory = true;
+            extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_external_memory_fd = true;
+            extensions.__bindgen_anon_1.__bindgen_anon_1.EXT_external_memory_dma_buf = true;
+        }
         extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_16bit_storage = true;
         extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_storage_buffer_storage_class = true;
     }
@@ -409,9 +427,10 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     VK_SUCCESS
 }
 
-fn find_borg_drm_device() -> i32 {
-    for i in 128..192 {
-        let Ok(f) = OpenOptions::new().read(true).write(true).open(format!("/dev/dri/renderD{i}")) else { continue };
+/// The first /dev/dri/`node`N of the borg driver, opened; -1 without one.
+fn find_borg_node(node: &str, n: std::ops::Range<u32>) -> i32 {
+    for i in n {
+        let Ok(f) = OpenOptions::new().read(true).write(true).open(format!("/dev/dri/{node}{i}")) else { continue };
         let ver = unsafe { drmGetVersion(f.as_raw_fd()) };
         if ver.is_null() {
             continue;
@@ -429,7 +448,7 @@ fn find_borg_drm_device() -> i32 {
 /// # Safety
 /// `instance` is a borgvk instance.
 pub unsafe extern "C" fn enumerate_devices(instance: *mut vk_instance) -> VkResult {
-    let fd = find_borg_drm_device();
+    let fd = find_borg_node("renderD", 128..192);
     if fd >= 0 {
         log(MESA_LOG_INFO, format!("borgvk: found borg DRM device (fd {fd})"));
     } else {
@@ -444,8 +463,10 @@ pub unsafe extern "C" fn destroy_physical_device(pdev: *mut vk_physical_device) 
     let d = pdev.cast::<PhysicalDevice>();
     unsafe {
         wsi_finish(&mut *d);
-        if (*d).drm_fd >= 0 {
-            close((*d).drm_fd);
+        for fd in [(*d).drm_fd, (*d).display_fd] {
+            if fd >= 0 {
+                close(fd);
+            }
         }
         vk_physical_device_finish(pdev);
         vk_free(&(*(*pdev).instance).alloc, pdev.cast());
