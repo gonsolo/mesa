@@ -440,7 +440,7 @@ impl Builder {
     }
 
     fn setup_room_tris(&self, shift: u32) -> u32 {
-        (BORG_HEAP_SPI.saturating_sub(self.setup_base) >> shift).min(LIST_MAX_TRIS)
+        (BORG_PUSH_CONST_SPI.saturating_sub(self.setup_base) >> shift).min(LIST_MAX_TRIS)
     }
 
     fn list_reset(&mut self) {
