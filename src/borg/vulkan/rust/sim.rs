@@ -506,24 +506,6 @@ fn copy_out(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &Before) -
     changed
 }
 
-/// C's atoi: leading blanks, a sign, then digits; 0 without any.
-pub(crate) fn atoi(s: &str) -> i64 {
-    let s = s.trim_start();
-    let (neg, digits) = match s.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, s.strip_prefix('+').unwrap_or(s)),
-    };
-    let v = digits
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .fold(0i64, |v, c| v.saturating_mul(10).saturating_add(c as i64 - '0' as i64));
-    if neg {
-        -v
-    } else {
-        v
-    }
-}
-
 /// The raw device of one server: register writes in batches, memory through the shared mappings.
 struct Raw<'a> {
     s: &'a mut Server,
@@ -727,14 +709,6 @@ mod tests {
         assert_eq!(tiled(0, 8, 0, 1, 64, 4), 16);
         assert_eq!(tiled(0, 8, 4, 0, 64, 4), 64);
         assert_eq!(tiled(100, 8, 5, 6, 64, 4), 100 + 3 * 64 + (1 | 2 << 2) * 4);
-    }
-
-    #[test]
-    fn atoi_like_c() {
-        assert_eq!(atoi("12"), 12);
-        assert_eq!(atoi("  7x"), 7);
-        assert_eq!(atoi("-3"), -3);
-        assert_eq!(atoi("abc"), 0);
     }
 
     #[test]

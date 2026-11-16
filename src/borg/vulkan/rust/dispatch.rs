@@ -17,7 +17,6 @@ use crate::texture_upload::{generic_texture, in_place};
 
 const SLOT_BYTES: u32 = 0x80000 * 4;
 const BASE_BYTES: u32 = 0x40000 * 4;
-const MAX_PARTS: u32 = 64;
 // The filtered texture: its descriptor, the sampler's at +64, the texels at +256.
 const WINDOWS: u32 = 40; // borgc's compute.rs
 const TEX_BYTES: u32 = BASE_BYTES + (WINDOWS + 4) * SLOT_BYTES;
@@ -356,28 +355,14 @@ fn build_job(pl: &Pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
 
 /// The headers of the parts: a packed program runs four one-invocation workgroups along x in a
 /// quad, so gx / 4 groups of four, then the gx % 4 left over in one group of that size.
-fn part_headers(pl: &Pipeline, direct: bool, g: [u32; 3], job: &[u8]) -> Vec<[u32; HDR]> {
-    let [gx, gy, gz] = g;
-    let packed = pl.cs_flags & 4 != 0;
-    let (px, rem) = if packed { (gx / 4, gx % 4) } else { (gx, 0) };
-    let axis = if gy > 1 && gy >= px { 1 } else if px > 1 { 0 } else { 2 };
-    let extent = [px, gy, gz][axis];
-    let mut nparts = (px != 0) as u32;
-    if direct && px != 0 && pl.cs_flags & 1 == 0 && gx as u64 * gy as u64 * gz as u64 >= 64 && extent > 1 {
-        let ncpu = unsafe { sysconf(_SC_NPROCESSORS_ONLN as i32) };
-        nparts = (extent as i64).min(ncpu.max(1)) as u32;
-        if let Some(p) = std::env::var_os("BORGVK_CS_PARTS") {
-            nparts = (extent as i64).min(crate::sim::atoi(&p.to_string_lossy())).max(1) as u32;
-        }
-    }
-    let nparts = nparts.min(MAX_PARTS - 1);
+fn part_headers(pl: &Pipeline, g: [u32; 3], job: &[u8]) -> Vec<[u32; HDR]> {
+    let gx = g[0];
+    let (px, rem) = if pl.cs_flags & 4 != 0 { (gx / 4, gx % 4) } else { (gx, 0) };
     let head: [u32; HDR] = std::array::from_fn(|i| u32::from_ne_bytes(job[i * 4..i * 4 + 4].try_into().unwrap()));
     let mut hdrs = Vec::new();
-    for k in 0..nparts {
+    if px != 0 {
         let mut h = head;
         h[1] = px;
-        h[1 + axis] = extent * (k + 1) / nparts - extent * k / nparts; // gx gy gz
-        h[9 + axis] = extent * k / nparts; // bx by bz
         hdrs.push(h);
     }
     if rem != 0 {
@@ -388,8 +373,8 @@ fn part_headers(pl: &Pipeline, direct: bool, g: [u32; 3], job: &[u8]) -> Vec<[u3
     hdrs
 }
 
-/// Runs the parts: each on a simulator of its own, all at once, or one after the other on the
-/// device. Each answer is the buffers' bytes after the part, in job order.
+/// Runs the parts one after the other, on a simulator or the device. Each answer is the buffers'
+/// bytes after the part, in job order.
 fn run_parts(direct: Option<&std::ffi::OsStr>, hdrs: &[[u32; HDR]], job: &[u8]) -> Vec<Option<Vec<u8>>> {
     let part = |hdr: &[u32; HDR]| {
         let mut p = job.to_vec();
@@ -398,19 +383,12 @@ fn run_parts(direct: Option<&std::ffi::OsStr>, hdrs: &[[u32; HDR]], job: &[u8]) 
         }
         p
     };
-    let Some(direct) = direct else {
-        return hdrs.iter().map(|h| crate::hw::compute(&part(h))).collect();
-    };
-    std::thread::scope(|sc| {
-        let runs: Vec<_> = hdrs
-            .iter()
-            .map(|h| {
-                let p = part(h);
-                sc.spawn(move || crate::dev::spawn(direct).and_then(|mut d| crate::hw::run_job(&mut d, &p)))
-            })
-            .collect();
-        runs.into_iter().map(|r| r.join().ok().flatten()).collect()
-    })
+    hdrs.iter()
+        .map(|h| match direct {
+            Some(d) => crate::dev::spawn(d).and_then(|mut dv| crate::hw::run_job(&mut dv, &part(h))),
+            None => crate::hw::compute(&part(h)),
+        })
+        .collect()
 }
 
 /// Every window as the job had it, with each byte a part changed.
@@ -486,7 +464,7 @@ fn dispatch(c: &mut CommandBuffer, gx: u32, gy: u32, gz: u32) {
     let g = [gx, gy, gz];
     let job = build_job(pl, g, &bufs);
     let mut ran = true;
-    let outs = run_parts(direct.as_deref(), &part_headers(pl, direct.is_some(), g, &job), &job);
+    let outs = run_parts(direct.as_deref(), &part_headers(pl, g, &job), &job);
     let merged = merge(&bufs, &outs, &mut ran);
     if borgvk_corpus_on() {
         let out = merged.iter().zip(&bufs).fold(hash(BORGVK_CORPUS_SEED as u64, &[ran as u8]), |h, (m, b)| hash(h, &m[..b.size as usize]));
