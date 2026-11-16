@@ -914,7 +914,17 @@ impl Ctx<'_> {
                             set_entry(&mut table, fb, entry(gpu + (ub.offset + off) as u32, len.min(size - off)));
                             continue;
                         }
-                        let len = len.min((size - off).min(SLOT_BYTES as u64)) as u32;
+                        let len = len.min(size - off);
+                        // A storage buffer larger than its slot goes past the slots, whole.
+                        if st && len > SLOT_BYTES as u64 {
+                            let at = uhost.with_bytes(off as usize, len as usize, |d| self.heap.upload(d)).ok_or(Reject::Upload)??;
+                            set_entry(&mut table, fb, entry(BORG_HEAP_SPI + at, len));
+                            if let Some(p) = uhost.ptr(off as usize, len as usize) {
+                                push_writeback(c, at, len as u32, p, PIPE_FORMAT_NONE);
+                            }
+                            continue;
+                        }
+                        let len = len.min(SLOT_BYTES as u64) as u32;
                         let at = base + if st || (fb != 0 && pl.ubo_mask != 0) { window_slot(fb) * SLOT_BYTES } else { 0 };
                         set_entry(&mut table, fb, entry(BORG_HEAP_SPI + at, len as u64));
                         for i in (0..len).step_by(256) {
