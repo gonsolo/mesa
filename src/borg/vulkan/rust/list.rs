@@ -236,12 +236,10 @@ pub struct Builder {
     push_at: u32,
     list: List,
     occ: (bool, u32),
-    window_tiles: u32,
 }
 
 impl Builder {
     pub fn new() -> Self {
-        let wt = std::env::var("BORG_WINDOW_TILES").ok().and_then(|v| v.parse().ok()).filter(|&v| v > 0 && v <= 64).unwrap_or(64);
         Builder {
             fb_w: 0,
             fb_h: 0,
@@ -281,7 +279,6 @@ impl Builder {
             push_at: 0,
             list: List { top: BORG_LIST_ENTRY_BYTES, ..Default::default() },
             occ: (false, 0),
-            window_tiles: wt,
         }
     }
 
@@ -306,11 +303,11 @@ impl Builder {
         self.setup_base = self.bin_base + tw * th * TBR_BIN_ROW_BYTES + 4 * LIST_MAX_TRIS;
     }
 
-    /// The render window in tiles: the target's width up to `window_tiles`, then as many rows as
+    /// The render window in tiles: the target's width up to WINDOW_TILES, then as many rows as
     /// the bin table holds, at most 128 (the 9-bit window coordinates).
     fn window(&self) -> (u32, u32) {
-        let tw = (self.fb_w >> 2).min(self.window_tiles).max(1);
-        let th = (self.fb_h >> 2).min(self.window_tiles * self.window_tiles / tw).min(128).max(1);
+        let tw = (self.fb_w >> 2).min(WINDOW_TILES).max(1);
+        let th = (self.fb_h >> 2).min(WINDOW_TILES * WINDOW_TILES / tw).min(128).max(1);
         (tw, th)
     }
 
@@ -800,6 +797,7 @@ impl Builder {
 const MEM: u32 = 0;
 const REG: u32 = 1;
 const TILES: u32 = 2;
+const WINDOW_TILES: u32 = 64;
 /// The most triangles a list holds.
 const LIST_MAX_TRIS: u32 = 60000;
 const OCC_BEGIN: u32 = 3;
