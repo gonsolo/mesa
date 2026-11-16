@@ -1,9 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Renders a pass's recorded lists on `direct_sim` processes (`BORGVK_SIM_DIRECT`) or on the
-//! Borg device (`dev`). A large pass is split into horizontal
-//! strips of tile rows, one simulator each.
+//! Renders a pass's recorded lists on a `direct_sim` process (`BORGVK_SIM_DIRECT`) or on the
+//! Borg device (`dev`).
 
 use crate::dev::Dev;
 use crate::ffi::*;
@@ -22,8 +21,6 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 
 const MEM_BYTES: usize = 0x800_0000;
-const MAX_PARTS: usize = 24;
-const PARALLEL_PIXELS: u32 = 64 * 64;
 
 /// One simulator: a server process sharing `mem` through a memfd, or the device itself.
 struct Server {
@@ -42,7 +39,7 @@ struct Server {
     att: [u32; 4],
 }
 
-// The memory is only touched under SERVERS' lock.
+// The memory is only touched under SERVER's lock.
 unsafe impl Send for Server {}
 
 impl Server {
@@ -142,7 +139,7 @@ impl Server {
     }
 }
 
-static SERVERS: Mutex<[Server; MAX_PARTS]> = Mutex::new([const { Server::new() }; MAX_PARTS]);
+static SERVER: Mutex<Server> = Mutex::new(Server::new());
 
 static LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -156,9 +153,6 @@ pub fn lost() -> bool {
     LOST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn stop_all(s: &mut [Server]) {
-    s.iter_mut().for_each(Server::stop);
-}
 
 
 fn hw_upload(d: &mut Dev, s: &Server, ranges: &[(u32, u32)]) {
@@ -530,27 +524,12 @@ pub(crate) fn atoi(s: &str) -> i64 {
     }
 }
 
-/// Strips of tile rows: how many simulators and how many rows each. Every strip shades all the
-/// vertices, but walks the draw list only for its own tiles.
-fn strips(wp: u32, hp: u32, hw: bool) -> (usize, u32) {
-    let np = match std::env::var_os("BORGVK_SERVE_PARTS") {
-        Some(v) => atoi(&v.to_string_lossy()),
-        None => (unsafe { sysconf(_SC_NPROCESSORS_ONLN as i32) } as i64).clamp(1, 12),
-    };
-    let np = if !hw && wp * hp >= PARALLEL_PIXELS { np.clamp(1, MAX_PARTS as i64) as u32 } else { 1 };
-    let ftiles = hp >> 2;
-    let rows_per = ftiles.div_ceil(np);
-    (ftiles.div_ceil(rows_per) as usize, rows_per)
-}
-
 /// The raw device of one server: register writes in batches, memory through the shared mappings.
 struct Raw<'a> {
     s: &'a mut Server,
     regs: Vec<u8>,
     n: u32,
     ok: bool,
-    peers: &'a [usize],                              // every strip's memory, for the shared boxes
-    barrier: &'a std::sync::Barrier,
 }
 
 impl Raw<'_> {
@@ -611,54 +590,20 @@ impl crate::list::Gpu for Raw<'_> {
         };
         unsafe { p.cast::<u32>().write_unaligned(v) };
     }
-
-    // Every strip waits here, even one that failed, so none waits forever.
-    fn boxes(&mut self, setup_base: u32, tris: u32, k: u32, n: u32) {
-        self.barrier.wait();
-        let tris = tris.min(setup_base / 4 - 1);
-        if !self.ok || setup_base as usize > MEM_BYTES || self.peers.len() != n as usize {
-            return;
-        }
-        let own = self.peers[k as usize] as *mut u32;
-        for t in (0..tris).filter(|t| t % n != k) {
-            let at = (setup_base / 4 - 1 - t) as usize;
-            unsafe { own.add(at).write_volatile((self.peers[(t % n) as usize] as *const u32).add(at).read_volatile()) };
-        }
-    }
 }
 
-/// Every server renders the lists, each its strip of tile rows; whether all answered.
-fn run_all(servers: &mut [Server], prog: &Prog, rows_per: u32) -> bool {
-    let np = servers.len() as u32;
-    let peers: Vec<usize> = servers.iter().map(|s| s.mem as usize).collect();
-    let barrier = std::sync::Barrier::new(servers.len());
-    let (peers, barrier) = (&peers[..], &barrier);
-    std::thread::scope(|sc| {
-        let runs: Vec<_> = servers
-            .iter_mut()
-            .enumerate()
-            .map(|(k, s)| {
-                sc.spawn(move || {
-                    let mut g = Raw { s, regs: Vec::new(), n: 0, ok: true, peers, barrier };
-                    prog.run(&mut g, (k as u32, np, rows_per));
-                    g.send();
-                    let mut sync = [0u8];
-                    g.ok && g.s.to.as_mut().is_some_and(|to| to.write_all(b"S").is_ok())
-                        && g.s.from.as_mut().is_some_and(|f| f.read_exact(&mut sync).is_ok())
-                })
-            })
-            .collect();
-        runs.into_iter().all(|r| r.join().unwrap_or(false))
-    })
-}
-
-fn start_servers(all: &mut [Server], np: usize, wp: u32, hp: u32, direct: Option<&OsStr>) -> bool {
-    all[..np].iter_mut().all(|s| s.start(direct) && s.set_size(wp, hp))
+/// The simulator renders the lists; whether it answered.
+fn run_sim(s: &mut Server, prog: &Prog) -> bool {
+    let mut g = Raw { s, regs: Vec::new(), n: 0, ok: true };
+    prog.run(&mut g);
+    g.send();
+    let mut sync = [0u8];
+    g.ok && g.s.to.as_mut().is_some_and(|to| to.write_all(b"S").is_ok()) && g.s.from.as_mut().is_some_and(|f| f.read_exact(&mut sync).is_ok())
 }
 
 /// The device: upload the attachments, run the lists, download them, the writebacks and the
 /// occlusion counters.
-fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, prog: &Prog, wb: &[Writeback], occ: &[u32], rows_per: u32) {
+fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, prog: &Prog, wb: &[Writeback], occ: &[u32]) {
     let tiles16 = (l.wp >> 2) * (l.h.next_multiple_of(4) >> 2) * 16 * l.ms;
     let mut ranges = Vec::new();
     if t.color.is_some() {
@@ -672,7 +617,7 @@ fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, prog: &Prog, 
         ranges.push((s.sb, tiles16));
     }
     hw_upload(d, s, &ranges);
-    prog.run(d, (0, 1, rows_per));
+    prog.run(d);
     hw_download(d, s, &ranges);
     for r in wb {
         let (a0, a1) = ((s.heap + r.off) & !3, (s.heap + r.off + r.size + 3) & !3);
@@ -731,60 +676,44 @@ pub fn run_pass(
 
     let direct = std::env::var_os("BORGVK_SIM_DIRECT");
     let hw = direct.is_none();
-    let (np, rows_per) = strips(wp, hp, hw);
-    let rows = |part: usize| part as u32 * rows_per * 4..h.min((part as u32 + 1) * rows_per * 4);
-
-    let mut all = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
-    if !start_servers(&mut all[..], np, wp, hp, direct.as_deref()) {
+    let mut s = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    if !(s.start(direct.as_deref()) && s.set_size(wp, hp)) {
         lose("cannot start the simulator");
-        stop_all(&mut all[..]);
+        s.stop();
         return none;
     }
-    for part in 0..np {
-        if !placed {
-            copy_in(&all[part], &l, rows(part), &t, &mut b);
-        }
+    if !placed {
+        copy_in(&s, &l, 0..h, &t, &mut b);
     }
     if hw {
-        crate::dev::with(|d| run_on_device(d, &all[0], &l, &t, prog, wb, occ, rows_per));
-    } else if !run_all(&mut all[..np], prog, rows_per) {
+        crate::dev::with(|d| run_on_device(d, &s, &l, &t, prog, wb, occ));
+    } else if !run_sim(&mut s, prog) {
         lose("the simulator stopped answering");
-        stop_all(&mut all[..]);
+        s.stop();
         return none;
     }
-    let mut changed = 0;
-    for part in 0..np {
-        if !placed {
-            changed += copy_out(&all[part], &l, rows(part), &t, &b);
-        }
-    }
-    // The writebacks from every strip; the first strip's bytes stand.
+    let changed = if placed { 0 } else { copy_out(&s, &l, 0..h, &t, &b) };
     for r in wb {
         let host = unsafe { std::slice::from_raw_parts_mut(r.host, r.host_size()) };
-        if r.pf != PIPE_FORMAT_NONE {
-            let bs = crate::fmt::blocksize(r.pf) as usize;
-            for s in all[..np].iter() {
-                let win = unsafe { std::slice::from_raw_parts(s.mem(s.heap + r.off), r.size as usize) };
-                for (t, new) in host.chunks_exact_mut(bs).zip(win.chunks_exact(16)) {
-                    let new = <&[u8; 16]>::try_from(new).unwrap();
-                    let mut old = [0u8; 16];
-                    crate::fmt::unpack_rgba(r.pf, t, &mut old);
-                    if old != *new {
-                        crate::fmt::pack_rgba(r.pf, t, new);
-                    }
-                }
-            }
+        let win = unsafe { std::slice::from_raw_parts(s.mem(s.heap + r.off), r.size as usize) };
+        if r.pf == PIPE_FORMAT_NONE {
+            host.copy_from_slice(win);
             continue;
         }
-        for s in all[..np].iter().rev() {
-            host.copy_from_slice(unsafe { std::slice::from_raw_parts(s.mem(s.heap + r.off), r.size as usize) });
+        let bs = crate::fmt::blocksize(r.pf) as usize;
+        for (t, new) in host.chunks_exact_mut(bs).zip(win.chunks_exact(16)) {
+            let new = <&[u8; 16]>::try_from(new).unwrap();
+            let mut old = [0u8; 16];
+            crate::fmt::unpack_rgba(r.pf, t, &mut old);
+            if old != *new {
+                crate::fmt::pack_rgba(r.pf, t, new);
+            }
         }
     }
     if std::env::var_os("BORGVK_DEBUG").is_some() {
         log(MESA_LOG_INFO, format!("borgvk: pass changed {changed} of {npx} pixels (format {fmt})"));
     }
-    // Each strip counts its own tiles.
-    occ.iter().map(|&o| all[..np].iter().map(|s| unsafe { s.mem(s.heap + o).cast::<u32>().read_unaligned() } as u64).sum()).collect()
+    occ.iter().map(|&o| unsafe { s.mem(s.heap + o).cast::<u32>().read_unaligned() } as u64).collect()
 }
 
 #[cfg(test)]
@@ -806,15 +735,6 @@ mod tests {
         assert_eq!(atoi("  7x"), 7);
         assert_eq!(atoi("-3"), -3);
         assert_eq!(atoi("abc"), 0);
-    }
-
-    #[test]
-    fn strips_cover_all_tile_rows() {
-        assert_eq!(strips(64, 64, true), (1, 16));
-        std::env::set_var("BORGVK_SERVE_PARTS", "3");
-        assert_eq!(strips(64, 64, false), (3, 6));
-        assert_eq!(strips(32, 32, false), (1, 8));
-        std::env::remove_var("BORGVK_SERVE_PARTS");
     }
 
     #[test]

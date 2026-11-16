@@ -23,9 +23,6 @@ pub trait Gpu {
             }
         }
     }
-    /// Strip `k` of `n` wrote the boxes of triangles t = k (mod n) below `setup_base`: take the
-    /// other strips' into this one's cache.
-    fn boxes(&mut self, _setup_base: u32, _tris: u32, _k: u32, _n: u32) {}
 }
 
 macro_rules! r {
@@ -591,7 +588,7 @@ impl Builder {
                 g.reg(reg, a);
             }
         }
-        g.op(&[TILES, fb_tiles, self.fb_h >> 2, tw, th, self.list.tris, self.setup_base]);
+        g.op(&[TILES, fb_tiles, self.fb_h >> 2, tw, th]);
         g.reg(r!(render_list), 0);
     }
 
@@ -852,8 +849,8 @@ impl Prog {
         self.put(w);
     }
 
-    /// Replays on `g` as strip `k` of `n`, `per` tile rows each.
-    pub fn run(&self, g: &mut dyn Gpu, (k, n, per): (u32, u32, u32)) {
+    /// Replays on `g`.
+    pub fn run(&self, g: &mut dyn Gpu) {
         let b = self.buf.as_slice();
         let w = |i: usize| le32(&b[4 * i..]);
         let (mut i, mut occ) = (0, 0u32);
@@ -873,29 +870,16 @@ impl Prog {
                 }
                 TILES => {
                     let (fb_tiles, fb_rows, tw, th) = (w(i + 1), w(i + 2), w(i + 3), w(i + 4));
-                    let (tris, setup_base) = (w(i + 5), w(i + 6));
-                    let (y0, rows) = if n > 1 { (k * per, per.min(fb_rows.saturating_sub(k * per))) } else { (0, fb_rows) };
-                    // Strips share the boxes: each runs the vertex shaders of every n-th triangle
-                    // (mode 3, one tile row, nothing binned), then every window skips what misses it.
-                    let shared = n > 1 && tris > 0;
-                    if shared {
-                        g.reg(r!(seq_tile_rows), 1 | 3 << 12 | k << 16 | n << 21);
-                        g.reg(r!(fb_origin), y0 << 16);
-                        g.reg(r!(seq_trigger), 1);
-                        // The trigger reads back done; busy might not be set yet when a fast CPU polls.
-                        g.wait(r!(seq_trigger), 1, 1);
-                        g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
-                        g.boxes(setup_base, tris, k, n);
-                    }
+                    let rows = fb_rows;
                     // More than one window: the first writes the box cache, the others skip what misses them.
                     let many = rows.div_ceil(th.max(1)) * fb_tiles.div_ceil(tw.max(1)) > 1;
-                    let mut box_mode = if shared { 2 } else if many { 1 } else { 0 };
-                    for wy in (y0..y0 + rows).step_by(th.max(1) as usize) {
+                    let mut box_mode = if many { 1 } else { 0 };
+                    for wy in (0..rows).step_by(th.max(1) as usize) {
                         for wx in (0..fb_tiles).step_by(tw.max(1) as usize) {
                             let mode = box_mode;
-                            box_mode = if shared || many { 2 } else { 0 };
+                            box_mode = if many { 2 } else { 0 };
                             win += 1;
-                            g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(th) | mode << 12);
+                            g.reg(r!(seq_tile_rows), (rows - wy).min(th) | mode << 12);
                             g.reg(r!(fb_origin), wx | wy << 16);
                             let t0 = std::time::Instant::now();
                             g.reg(r!(seq_trigger), 1);
@@ -911,7 +895,7 @@ impl Prog {
                         }
                     }
                     g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
-                    i += 7;
+                    i += 5;
                 }
                 OCC_BEGIN => {
                     occ = 0;
