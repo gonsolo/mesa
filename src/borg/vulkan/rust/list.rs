@@ -23,12 +23,6 @@ pub trait Gpu {
             }
         }
     }
-    /// Whether window `n` of the program is already done (resumed from a checkpoint).
-    fn skip(&mut self, _n: u32) -> bool {
-        false
-    }
-    /// Windows 0..n are done.
-    fn done(&mut self, _n: u32) {}
     /// Strip `k` of `n` wrote the boxes of triangles t = k (mod n) below `setup_base`: take the
     /// other strips' into this one's cache.
     fn boxes(&mut self, _setup_base: u32, _tris: u32, _k: u32, _n: u32) {}
@@ -859,17 +853,11 @@ impl Prog {
     }
 
     /// Replays on `g` as strip `k` of `n`, `per` tile rows each.
-    /// The program's words, for the pass cache's fingerprint.
-    pub fn words(&self) -> (&[u8], &[u32]) {
-        (self.buf.as_slice(), &self.run)
-    }
-
     pub fn run(&self, g: &mut dyn Gpu, (k, n, per): (u32, u32, u32)) {
         let b = self.buf.as_slice();
         let w = |i: usize| le32(&b[4 * i..]);
         let (mut i, mut occ) = (0, 0u32);
-        // Checkpoints stop at the first query: its count lives across windows.
-        let (mut win, mut queries) = (0u32, false);
+        let mut win = 0u32;
         while 4 * i < b.len() {
             match w(i) {
                 MEM => {
@@ -907,9 +895,6 @@ impl Prog {
                             let mode = box_mode;
                             box_mode = if shared || many { 2 } else { 0 };
                             win += 1;
-                            if g.skip(win - 1) {
-                                continue;
-                            }
                             g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(th) | mode << 12);
                             g.reg(r!(fb_origin), wx | wy << 16);
                             let t0 = std::time::Instant::now();
@@ -923,16 +908,13 @@ impl Prog {
                                 let q: Vec<u32> = (0..15).map(|j| { g.reg(r!(perf_issue), j); g.read(r!(perf_issue)) }).collect();
                                 eprintln!("[perf] win {win} at {wx},{wy} mode {mode} {:?} ms {} issue {:?}", p, t0.elapsed().as_millis(), q);
                             }
-                            if !queries {
-                                g.done(win);
-                            }
                         }
                     }
                     g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
                     i += 7;
                 }
                 OCC_BEGIN => {
-                    (occ, queries) = (0, true);
+                    occ = 0;
                     i += 1;
                 }
                 _ => {
