@@ -53,7 +53,9 @@ fn open() -> Option<Dev> {
     } else if let Some(raw) = std::env::var_os("BORG_HW_RAW") {
         let mut c = Command::new(raw).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
         let (to, from) = (c.stdin.take()?, c.stdout.take()?);
-        Link::Pipe(Box::new(to), Box::new(from), Some(c))
+        let mut d = Dev::new(Link::Pipe(Box::new(to), Box::new(from), Some(c)));
+        d.dirty(); // what an earlier session left
+        return Some(d);
     } else {
         let node = std::env::var("BORG_HW_NODE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
         let f = (0..100).find_map(|_| {
@@ -154,6 +156,16 @@ impl Dev {
         self.flush_regs();
         self.flush_mem();
         self.write(off, p);
+    }
+
+    /// The 4 KB pages of the 256 MB window Borg wrote since the last call, a bit each ('D').
+    pub fn dirty(&mut self) -> Vec<u8> {
+        self.flush_regs();
+        self.flush_mem();
+        let mut b = vec![0u8; 8192];
+        self.put(b"D");
+        self.get(&mut b);
+        b
     }
 
     /// GPU memory at `off` into `p`.

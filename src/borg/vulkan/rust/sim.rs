@@ -598,9 +598,12 @@ fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, prog: &Prog, 
     if t.s.is_some() {
         ranges.push((s.sb, tiles16));
     }
+    let heap = crate::heap::get();
+    heap.inspect(|h| h.to_board(d));
     hw_upload(d, s, &ranges);
     prog.run(d);
     hw_download(d, s, &ranges);
+    heap.inspect(|h| h.from_board(d));
     for r in wb {
         let (a0, a1) = ((s.heap + r.off) & !3, (s.heap + r.off + r.size + 3) & !3);
         hw_download(d, s, &[(a0, a1 - a0)]);

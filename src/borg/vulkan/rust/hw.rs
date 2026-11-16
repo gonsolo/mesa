@@ -44,7 +44,14 @@ impl Job<'_> {
 
 /// A compute job on the device: the buffers' bytes after it, in job order.
 pub fn compute(job: &[u8]) -> Option<Vec<u8>> {
-    crate::dev::with(|d| run_job(d, job)).flatten()
+    crate::dev::with(|d| {
+        let heap = crate::heap::get();
+        heap.inspect(|h| h.to_board(d));
+        let out = run_job(d, job);
+        heap.inspect(|h| h.from_board(d));
+        out
+    })
+    .flatten()
 }
 
 /// The job as register and memory accesses: program, presets and buffers in, one dispatch, the
