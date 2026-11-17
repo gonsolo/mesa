@@ -583,20 +583,22 @@ fn run_sim(s: &mut Server, prog: &Prog) -> bool {
     g.ok && g.s.to.as_mut().is_some_and(|to| to.write_all(b"S").is_ok()) && g.s.from.as_mut().is_some_and(|f| f.read_exact(&mut sync).is_ok())
 }
 
-/// The device: upload the attachments, run the lists, download them, the writebacks and the
-/// occlusion counters.
-fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, prog: &Prog, wb: &[Writeback], occ: &[u32]) {
+/// The device: upload the attachments (unless the pass renders in place), run the lists,
+/// download them, the writebacks and the occlusion counters.
+fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, prog: &Prog, wb: &[Writeback], occ: &[u32], placed: bool) {
     let tiles16 = (l.wp >> 2) * (l.h.next_multiple_of(4) >> 2) * 16 * l.ms;
     let mut ranges = Vec::new();
-    if t.color.is_some() {
-        ranges.push((s.fb, tiles16 * l.cpx));
-    }
-    ranges.extend((0..t.extra.len()).map(|a| (s.att[a + 1], tiles16)));
-    if t.z.is_some() {
-        ranges.push((s.zb, tiles16 * l.zpx));
-    }
-    if t.s.is_some() {
-        ranges.push((s.sb, tiles16));
+    if !placed {
+        if t.color.is_some() {
+            ranges.push((s.fb, tiles16 * l.cpx));
+        }
+        ranges.extend((0..t.extra.len()).map(|a| (s.att[a + 1], tiles16)));
+        if t.z.is_some() {
+            ranges.push((s.zb, tiles16 * l.zpx));
+        }
+        if t.s.is_some() {
+            ranges.push((s.sb, tiles16));
+        }
     }
     let heap = crate::heap::get();
     heap.inspect(|h| h.to_board(d));
@@ -671,7 +673,7 @@ pub fn run_pass(
         copy_in(&s, &l, 0..h, &t, &mut b);
     }
     if hw {
-        crate::dev::with(|d| run_on_device(d, &s, &l, &t, prog, wb, occ));
+        crate::dev::with(|d| run_on_device(d, &s, &l, &t, prog, wb, occ, placed));
     } else if !run_sim(&mut s, prog) {
         lose("the simulator stopped answering");
         s.stop();
