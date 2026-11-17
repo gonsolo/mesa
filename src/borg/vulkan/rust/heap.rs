@@ -160,8 +160,10 @@ impl Heap {
         }
     }
 
-    /// The pages of `off..off + len` that `want`, from the board into the heap and the copy.
+    /// The pages of `off..off + len` that `want`, from the board into the heap and the copy, in
+    /// one batch of reads.
     fn fetch(&self, d: &mut crate::dev::Dev, b: &mut Board, off: usize, len: usize, want: impl Fn(&Board, usize) -> bool) {
+        let mut runs = Vec::new();
         let mut p = off;
         while p < off + len {
             let start = p;
@@ -170,12 +172,18 @@ impl Heap {
             }
             if p == start {
                 p += PAGE;
-                continue;
+            } else {
+                runs.push((start, p - start));
             }
-            let run = unsafe { std::slice::from_raw_parts_mut(self.base.add(start), p - start) };
-            d.mem_read(BORG_DEVICE_BASE + start as u32, run);
-            unsafe { std::ptr::copy_nonoverlapping(run.as_ptr(), b.copy.add(start), run.len()) };
-            (start..p).step_by(PAGE).for_each(|q| {
+        }
+        let mut reads: Vec<(u32, &mut [u8])> = runs
+            .iter()
+            .map(|&(s, n)| (BORG_DEVICE_BASE + s as u32, unsafe { std::slice::from_raw_parts_mut(self.base.add(s), n) }))
+            .collect();
+        d.mem_reads(&mut reads);
+        for &(s, n) in &runs {
+            unsafe { std::ptr::copy_nonoverlapping(self.base.add(s), b.copy.add(s), n) };
+            (s..s + n).step_by(PAGE).for_each(|q| {
                 set(&mut b.sent, q, true);
                 set(&mut b.stale, q, false);
             });

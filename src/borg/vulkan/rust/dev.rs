@@ -163,16 +163,28 @@ impl Dev {
 
     /// GPU memory at `off` into `p`.
     pub fn mem_read(&mut self, off: u32, p: &mut [u8]) {
+        self.mem_reads(&mut [(off, p)]);
+    }
+
+    /// Several reads of GPU memory: over a link all requests go first, so they cost one round trip.
+    pub fn mem_reads(&mut self, reads: &mut [(u32, &mut [u8])]) {
         self.flush_regs();
         self.flush_mem();
         if matches!(self.link, Link::Drm(_)) {
-            let mut m = drm_borg_mem { data: p.as_mut_ptr() as u64, offset: off, length: p.len() as u32 };
-            self.ioctl(drm::MEM_READ, &mut m);
-        } else {
-            let mut q = vec![b'm'];
+            for (off, p) in reads.iter_mut() {
+                let mut m = drm_borg_mem { data: p.as_mut_ptr() as u64, offset: *off, length: p.len() as u32 };
+                self.ioctl(drm::MEM_READ, &mut m);
+            }
+            return;
+        }
+        let mut q = Vec::with_capacity(9 * reads.len());
+        for (off, p) in reads.iter() {
+            q.push(b'm');
             q.extend_from_slice(&off.to_le_bytes());
             q.extend_from_slice(&(p.len() as u32).to_le_bytes());
-            self.put(&q);
+        }
+        self.put(&q);
+        for (_, p) in reads.iter_mut() {
             self.get(p);
         }
     }
