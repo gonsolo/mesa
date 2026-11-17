@@ -134,6 +134,7 @@ enum Reject {
     VertexInput = 8,
     VertexRange = 9,
     Upload = 10,
+    NoGpuAddress = 11,
     MrtFormats = 12,
     MrtExtent = 13,
     MrtNotServed = 14,
@@ -870,7 +871,7 @@ impl Ctx<'_> {
                         let fb = pl.set_base[si] as u32 + b as u32;
                         if let Some(bv) = storage_texels(ds, b) {
                             let at = base + window_slot(fb) * SLOT_BYTES;
-                            match texels_in_place(c, bv, at) {
+                            match texels_in_place(bv, at) {
                                 Some(e) => set_entry(&mut table, fb, e),
                                 None => upload_storage_texels(c, bv, at),
                             }
@@ -878,7 +879,7 @@ impl Ctx<'_> {
                         }
                         if let Some(simg) = storage_image(ds, b) {
                             let at = base + window_slot(fb) * SLOT_BYTES;
-                            if let Some(e) = image_in_place(c, ds, b, simg, at) {
+                            if let Some(e) = image_in_place(ds, b, simg, at) {
                                 set_entry(&mut table, fb, e);
                                 continue;
                             }
@@ -896,7 +897,7 @@ impl Ctx<'_> {
                             continue;
                         }
                         let Some(ub) = ds.buffer(b) else { continue };
-                        let Some(uhost) = ub.host() else { continue };
+                        let Some(mem) = ub.memory() else { continue };
                         let st = smask >> fb & 1 != 0;
                         if !st && pl.ubo_mask != 0 && pl.ubo_mask >> fb & 1 == 0 {
                             continue;
@@ -909,33 +910,11 @@ impl Ctx<'_> {
                         }
                         let range = ds.ranges[b];
                         let len = if range == VK_WHOLE_SIZE as u64 || range == 0 { size - off } else { range };
-                        // In the device heap the shader reads and writes the buffer where it is.
-                        if let Some(gpu) = ub.memory().map(|m| m.gpu).filter(|&g| g != 0) {
-                            set_entry(&mut table, fb, entry(gpu + (ub.offset + off) as u32, len.min(size - off)));
-                            continue;
+                        // The shader reads and writes the buffer where it is.
+                        if mem.gpu == 0 {
+                            return Err(Reject::NoGpuAddress);
                         }
-                        let len = len.min(size - off);
-                        // A storage buffer larger than its slot goes past the slots, whole.
-                        if st && len > SLOT_BYTES as u64 {
-                            let at = uhost.with_bytes(off as usize, len as usize, |d| self.heap.upload(d)).ok_or(Reject::Upload)??;
-                            set_entry(&mut table, fb, entry(BORG_HEAP_SPI + at, len));
-                            if let Some(p) = uhost.ptr(off as usize, len as usize) {
-                                push_writeback(c, at, len as u32, p, PIPE_FORMAT_NONE);
-                            }
-                            continue;
-                        }
-                        let len = len.min(SLOT_BYTES as u64) as u32;
-                        let at = base + if st || (fb != 0 && pl.ubo_mask != 0) { window_slot(fb) * SLOT_BYTES } else { 0 };
-                        set_entry(&mut table, fb, entry(BORG_HEAP_SPI + at, len as u64));
-                        for i in (0..len).step_by(256) {
-                            let n = 256.min(len - i);
-                            let mut tmp = [0u8; 256];
-                            uhost.read(off as usize + i as usize, &mut tmp[..n as usize]);
-                            send_mem(at + i, &tmp[..((n + 3) & !3) as usize]);
-                        }
-                        if let Some(p) = uhost.ptr(off as usize, len as usize).filter(|_| st) {
-                            push_writeback(c, at, len, p, PIPE_FORMAT_NONE);
-                        }
+                        set_entry(&mut table, fb, entry(mem.gpu + (ub.offset + off) as u32, len.min(size - off)));
                     }
                 }
                 if pl.push_window {
@@ -1128,30 +1107,17 @@ fn storage_texels(set: &DescriptorSet, b: usize) -> Option<&vk_buffer_view> {
 }
 
 /// A storage texel buffer the shader addresses itself (borgc: borg_lower_image_in_place): its
-/// window holds the descriptor, base and element count, then the texels when not in the heap.
-fn texels_in_place(c: &mut CommandBuffer, bv: &vk_buffer_view, at: u32) -> Option<[u32; 2]> {
+/// window holds the descriptor, base and element count.
+fn texels_in_place(bv: &vk_buffer_view, at: u32) -> Option<[u32; 2]> {
     let pf = fmt::pipe(bv.format);
     let bs = fmt::blocksize(pf);
     if bs == 0 || !unsafe { borg_lower_image_in_place(pf) } {
         return None;
     }
     let tb = bv.buffer()?;
-    let host = tb.host()?;
-    let gpu = tb.memory().map_or(0, |m| m.gpu);
-    let max = if gpu != 0 { u32::MAX } else { (SLOT_BYTES - 64) / bs };
-    let n = (bv.range / bs as u64).min(max as u64) as u32;
-    let base = if gpu != 0 { gpu + (tb.offset + bv.offset) as u32 } else { BORG_HEAP_SPI + at + 64 };
-    send_mem(at, bytes_of(&[base, 0, 0, n, 1, 1]));
-    if gpu == 0 {
-        let bytes = (n * bs) as usize;
-        host.with_bytes(bv.offset as usize, bytes, |t| {
-            for (i, chunk) in t.chunks(256).enumerate() {
-                send_mem(at + 64 + i as u32 * 256, chunk);
-            }
-        })?;
-        let p = host.ptr(bv.offset as usize, bytes)?;
-        push_writeback(c, at + 64, bytes as u32, p, PIPE_FORMAT_NONE);
-    }
+    let gpu = tb.memory().map(|m| m.gpu).filter(|&g| g != 0)?;
+    let n = (bv.range / bs as u64).min(u32::MAX as u64) as u32;
+    send_mem(at, bytes_of(&[gpu + (tb.offset + bv.offset) as u32, 0, 0, n, 1, 1]));
     Some(entry(BORG_HEAP_SPI + at, 24))
 }
 
@@ -1188,9 +1154,9 @@ fn in_place_format(set: &DescriptorSet, b: usize, img: &Image) -> bool {
 }
 
 /// A storage image the fragment shader addresses itself (borgc: borg_lower_image_in_place): its
-/// window holds the view's descriptor, base, row pitch, layer stride, width, height, layers; the
-/// texels follow it when the image is not in the device heap. The binding table entry.
-fn image_in_place(c: &mut CommandBuffer, set: &DescriptorSet, b: usize, img: &Image, at: u32) -> Option<[u32; 2]> {
+/// window holds the view's descriptor, base, row pitch, layer stride, width, height, layers. The
+/// binding table entry.
+fn image_in_place(set: &DescriptorSet, b: usize, img: &Image, at: u32) -> Option<[u32; 2]> {
     if !in_place_format(set, b, img) {
         return None;
     }
@@ -1199,24 +1165,8 @@ fn image_in_place(c: &mut CommandBuffer, set: &DescriptorSet, b: usize, img: &Im
     let (off, stride) = sh.level_offset(lvl, l0, blk);
     let mip = |e: u32| (e >> lvl).max(1);
     let (w, h, pitch) = (mip(img.vk.extent.width), mip(img.vk.extent.height), stride * blk.bs);
-    let bytes = pitch as u64 * h as u64;
-    let gpu = img.memory().map_or(0, |m| m.gpu);
-    let base = if gpu != 0 { gpu + (img.offset + off) as u32 } else { BORG_HEAP_SPI + at + 64 };
-    let desc = [base, pitch, sh.layer_size(blk) as u32, w, h, 1];
-    send_mem(at, bytes_of(&desc));
-    if gpu == 0 {
-        if 64 + bytes > SLOT_BYTES as u64 {
-            return None;
-        }
-        let host = img.host()?;
-        host.with_bytes(off as usize, bytes as usize, |t| {
-            for (i, chunk) in t.chunks(256).enumerate() {
-                send_mem(at + 64 + i as u32 * 256, chunk);
-            }
-        })?;
-        let p = host.ptr(off as usize, bytes as usize)?;
-        push_writeback(c, at + 64, bytes as u32, p, PIPE_FORMAT_NONE);
-    }
+    let gpu = img.memory().map(|m| m.gpu).filter(|&g| g != 0)?;
+    send_mem(at, bytes_of(&[gpu + (img.offset + off) as u32, pitch, sh.layer_size(blk) as u32, w, h, 1]));
     Some(entry(BORG_HEAP_SPI + at, 24))
 }
 
