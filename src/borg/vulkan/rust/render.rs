@@ -84,12 +84,20 @@ fn target_view(c: &mut CommandBuffer, view: Option<&vk_image_view>) -> *mut vk_i
 }
 
 /// The depth or stencil attachment's view, cleared on load.
+/// A load op's clear: on Borg where that pays, else on the CPU.
+fn load_clear(c: &CommandBuffer, view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkClearValue, layers: u32) {
+    let alloc = unsafe { &(*c.vk.pool).alloc } as *const VkAllocationCallbacks;
+    if !crate::clear::on_gpu(view, aspect, value, c.render_area, 0, layers, alloc) {
+        clear_rect(view, aspect, value, c.render_area, 0, layers);
+    }
+}
+
 fn depth_stencil(c: &mut CommandBuffer, att: Option<&VkRenderingAttachmentInfo>, aspect: VkImageAspectFlags, layers: u32) -> *mut vk_image_view {
     let Some(att) = att else { return null_mut() };
     let view = unsafe { att.imageView.get_ref() };
     let target = target_view(c, view);
     if let Some(v) = view.filter(|_| att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && !c.recording()) {
-        clear_rect(v, aspect, &att.clearValue, c.render_area, 0, layers);
+        load_clear(c, v, aspect, &att.clearValue, layers);
     }
     target
 }
@@ -119,7 +127,7 @@ entrypoint! {
             c.color_resolve_views[i] = target_view(c, unsafe { att.resolveImageView.get_ref() });
             if let Some(view) = view.filter(|_| att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
                 if !rec {
-                    clear_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, c.render_area, 0, layers);
+                    load_clear(c, view, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, layers);
                 }
                 if i == 0 {
                     c.has_clear = true;

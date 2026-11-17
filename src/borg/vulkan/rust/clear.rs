@@ -9,7 +9,7 @@ use crate::ffi::*;
 use crate::fmt;
 use crate::image::{blocks, Image, ViewImage};
 use crate::texels::Texels;
-use crate::vk::ClearValue;
+use crate::vk::{ClearColorValue, ClearValue};
 use crate::texel::{pack_clear_color, write_depth_stencil, Texel};
 
 fn level_count(image: &vk_image, r: &VkImageSubresourceRange) -> u32 {
@@ -160,4 +160,91 @@ entrypoint! {
             }
         }
     }
+}
+
+/// The flusher's UNORM8 of an FP16 channel (ColorQuantize.quantize8): round(v * 255).
+fn quantize8(h: u16) -> Option<u8> {
+    let (e, m) = ((h >> 10 & 31) as i32, (h & 1023) as f64);
+    if e == 31 {
+        return None;
+    }
+    let v = if e == 0 { m * 2f64.powi(-24) } else { (1024.0 + m) * 2f64.powi(e - 25) };
+    Some(if h >> 15 != 0 { 0 } else { (v * 255.0 + 0.5).floor().min(255.0) as u8 })
+}
+
+/// The flusher's D16 of an FP32 depth (DepthQuantize.quantize16Fp32): round(d * 65535).
+fn quantize16(d: f32) -> u16 {
+    let e = d.to_bits() >> 23 & 255;
+    if d.is_sign_negative() || e == 0 {
+        0
+    } else if e >= 127 {
+        65535
+    } else {
+        (d as f64 * 65535.0 + 0.5).floor().min(65535.0) as u16
+    }
+}
+
+/// Clears all of a large single-level, single-layer, single-sample attachment with a pass on Borg
+/// when that stores the bytes the CPU's clear would: there the CPU's clear (Linux on Hutt) or the
+/// upload of what it wrote (USB) costs more than the pass.
+pub fn on_gpu(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkClearValue, rect: VkRect2D, base_layer: u32, layers: u32, alloc: *const VkAllocationCallbacks) -> bool {
+    use crate::list::Cmd;
+    let Some(img) = view.image() else { return false };
+    let (w, h) = (img.vk.extent.width, img.vk.extent.height);
+    let whole = rect.offset.x == 0 && rect.offset.y == 0 && rect.extent.width == w && rect.extent.height == h;
+    let single = img.vk.mip_levels == 1 && img.vk.array_layers == 1 && img.vk.samples <= 1 && layers == 1 && base_layer == 0;
+    if !whole || !single || w * h < 1 << 16 || view.format != img.vk.format || !crate::hw::serves_extent(w, h, false) {
+        return false;
+    }
+    let pf = fmt::pipe(img.vk.format);
+    let (cmds, color, zimg) = match aspect {
+        VK_IMAGE_ASPECT_COLOR_BIT => {
+            let bgra = match img.vk.format {
+                VK_FORMAT_B8G8R8A8_UNORM => true,
+                VK_FORMAT_R8G8B8A8_UNORM => false,
+                _ => return false,
+            };
+            let mut px = [0u8; 16];
+            pack_clear_color(img.vk.format, pf, &mut px, value.color());
+            let c = value.color().float32();
+            let mut rgb = [0u8; 3];
+            for (k, v) in rgb.iter_mut().enumerate() {
+                let Some(q) = quantize8(crate::list::f32_to_fp16(c[k].to_bits())) else { return false };
+                *v = q;
+            }
+            let stored = if bgra { [rgb[2], rgb[1], rgb[0]] } else { rgb };
+            if stored != px[..3] {
+                return false;
+            }
+            let f = crate::format::flush_format(img.vk.format);
+            (vec![Cmd::Pass(f, 0), Cmd::Target(f, c), Cmd::ClearPass(0xff00 & (px[3] as u32) << 8, 1f32.to_bits())], Some(img), None)
+        }
+        VK_IMAGE_ASPECT_DEPTH_BIT => {
+            let d = value.depth_stencil().depth;
+            let d32 = crate::format::depth_is_d32(img.vk.format);
+            let mut t: Texel = [0; 32];
+            write_depth_stencil(pf, &mut t, aspect, d, 0);
+            let same = match img.vk.format {
+                VK_FORMAT_D16_UNORM | VK_FORMAT_D16_UNORM_S8_UINT => quantize16(d).to_le_bytes() == t[..2],
+                VK_FORMAT_D32_SFLOAT | VK_FORMAT_D32_SFLOAT_S8_UINT => d.to_le_bytes() == t[..4],
+                _ => false,
+            };
+            if !same {
+                return false;
+            }
+            (vec![Cmd::Pass(0, 1 | (d32 as u8) << 2 | 8), Cmd::ClearPass(0xff00, d.to_bits())], None, Some(img))
+        }
+        _ => return false,
+    };
+    let Some((at, pitch)) = crate::sim::placement(color, &[], zimg, None, [w, h]) else { return false };
+    let mut b = crate::list::Batch::new();
+    b.pending = cmds;
+    b.pending.insert(1, Cmd::Place(at, pitch));
+    b.build(Some(((w + 3) & !3, (h + 3) & !3)), alloc);
+    let (Some(prog), _) = b.end() else { return false };
+    if !prog.ok {
+        return false;
+    }
+    crate::sim::run_pass(&prog, color, &[], zimg, None, &[], [w, h], &[], true);
+    true
 }
