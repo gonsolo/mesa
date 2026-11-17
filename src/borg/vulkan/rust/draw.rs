@@ -658,19 +658,10 @@ impl Ctx<'_> {
                 return Err(Reject::VertexInput);
             }
             let (avail, gpu) = (self.c.vb_avail[b], self.c.vb_gpu[b]);
-            if gpu != 0 {
-                self.vb_entries.push((BORG_VB_SLOT0 + b as u32, entry(gpu, avail)));
-                continue;
+            if gpu == 0 {
+                return Err(Reject::NoGpuAddress);
             }
-            let stride = pl.binding_stride[b] as u64;
-            let (r0, r1) = if pl.binding_instance[b] { (self.imin, self.imax) } else { (self.vmin, self.vmax) };
-            let end = pl.attrs[..pl.attr_count as usize].iter().filter(|a| a.binding as usize == b)
-                .map(|a| a.offset as u64 + blocks(a.format).bs as u64).max().unwrap_or(0);
-            let lo = (r0.max(0) as u64).wrapping_mul(stride).min(avail);
-            let hi = ((r1.max(0) as u64).wrapping_mul(stride) + stride.max(end)).min(avail);
-            let vb = unsafe { Host::new(self.c.vb[b].cast_mut(), avail as usize) };
-            let at = vb.with_bytes(lo as usize, (hi - lo) as usize, |d| self.heap.upload(d)).ok_or(Reject::Upload)??;
-            self.vb_entries.push((BORG_VB_SLOT0 + b as u32, entry((BORG_HEAP_SPI + at).wrapping_sub(lo as u32), hi)));
+            self.vb_entries.push((BORG_VB_SLOT0 + b as u32, entry(gpu, avail)));
         }
         Ok(())
     }
@@ -812,12 +803,10 @@ impl Ctx<'_> {
             (self.index_code, self.voff_out) = (2, 0);
             self.idx_off = BORG_HEAP_SPI + off?;
         } else if self.c.index_gpu != 0 {
-            // In the device heap the hardware reads the indices where they are.
+            // The hardware reads the indices where they are.
             self.idx_off = self.c.index_gpu + self.idx_base as u32;
         } else {
-            let n = p.count as usize * p.index_size as usize;
-            let (idx, base) = (self.idx, self.idx_base);
-            self.idx_off = BORG_HEAP_SPI + idx.with_bytes(base, n, |b| self.heap.upload(b)).ok_or(Reject::Upload)??;
+            return Err(Reject::NoGpuAddress);
         }
         Ok(())
     }
