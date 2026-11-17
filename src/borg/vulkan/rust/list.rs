@@ -61,6 +61,8 @@ pub enum Cmd {
     TexSlot(u8, u8, u32),
     TexDesc([u32; 16], [u32; 4]),
     TexLevels([u32; 12]),
+    /// A pass without draws: every tile to the clear values (PLANE_CLEAR, CLEAR_DEPTH) and flushed.
+    ClearPass(u32, u32),
 }
 
 /// Word `i` of `b`, bytes past its end as zeros.
@@ -79,7 +81,7 @@ fn float_from_uint(v: u32) -> u32 {
     (v as f32).to_bits()
 }
 
-fn f32_to_fp16(f: u32) -> u16 {
+pub fn f32_to_fp16(f: u32) -> u16 {
     let (sign, exp, man) = ((f >> 16) & 0x8000, (f >> 23) & 0xFF, f & 0x7F_FFFF);
     if exp == 0xFF {
         return (sign | 0x7C00 | if man != 0 { 0x200 } else { 0 }) as u16;
@@ -761,6 +763,17 @@ impl Builder {
                 (self.tex_slot, self.samp_slot, self.tex_base) = (0, 0, 0);
             }
             Cmd::TexLevels(l) => self.tex_lvl = *l,
+            &Cmd::ClearPass(planes, depth) => {
+                self.flush(g);
+                g.reg(r!(plane_clear), planes);
+                g.reg(r!(clear_depth), depth);
+                g.mem(BORG_LIST_SPI, 0);
+                g.mem(BORG_LIST_SPI + 4, 0);
+                self.trigger(g, BORG_LIST_SPI, 0);
+                // The draws' passes clear to opaque and FP16_MAX_DEPTH, as before CLEAR_DEPTH was written.
+                g.reg(r!(plane_clear), 0xff00);
+                g.reg(r!(clear_depth), 65504f32.to_bits());
+            }
             &Cmd::TexSlot(t, s, base) => {
                 if t as u32 >= TEX_SLOTS || s as u32 >= TEX_SLOTS || base & 255 != 0 || base >= TEXEL_BYTES {
                     return false;
