@@ -151,6 +151,22 @@ impl Dev {
         self.write(off, p);
     }
 
+    /// `len` bytes at `off` to the word `v` ('F'); on the DRM node a write.
+    pub fn mem_fill(&mut self, off: u32, len: u32, v: u32) {
+        self.flush_regs();
+        self.flush_mem();
+        if matches!(self.link, Link::Drm(_)) {
+            let words = vec![v; len as usize / 4];
+            self.write(off, unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), len as usize) });
+            return;
+        }
+        let mut b = vec![b'F'];
+        for w in [off, len, v] {
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+        self.put(&b);
+    }
+
     /// The 4 KB pages of the 256 MB window Borg wrote since the last call, a bit each ('D').
     pub fn dirty(&mut self) -> Vec<u8> {
         self.flush_regs();

@@ -29,6 +29,29 @@ struct Board {
     stale: Vec<u64>,
 }
 
+/// The word a page repeats, if it is one word over and over (a clear, fresh memory).
+fn uniform(page: &[u8]) -> Option<u32> {
+    let w: &[u32] = unsafe { std::slice::from_raw_parts(page.as_ptr().cast(), page.len() / 4) };
+    w.iter().all(|&x| x == w[0]).then_some(w[0])
+}
+
+/// `run` to the board at `gpu`: stretches of pages that repeat one word as a fill, the rest as data.
+fn upload(d: &mut crate::dev::Dev, gpu: u32, run: &[u8]) {
+    let mut at = 0;
+    while at < run.len() {
+        let v = uniform(&run[at..at + PAGE]);
+        let mut end = at + PAGE;
+        while end < run.len() && uniform(&run[end..end + PAGE]) == v {
+            end += PAGE;
+        }
+        match v {
+            Some(v) => d.mem_fill(gpu + at as u32, (end - at) as u32, v),
+            None => d.mem_write(gpu + at as u32, &run[at..end]),
+        }
+        at = end;
+    }
+}
+
 fn bit(v: &[u64], p: usize) -> bool {
     v[p / PAGE / 64] >> (p / PAGE % 64) & 1 != 0
 }
@@ -136,7 +159,7 @@ impl Heap {
                     continue;
                 }
                 let run = unsafe { std::slice::from_raw_parts(self.base.add(start), p - start) };
-                d.mem_write(BORG_DEVICE_BASE + start as u32, run);
+                upload(d, BORG_DEVICE_BASE + start as u32, run);
                 unsafe { std::ptr::copy_nonoverlapping(run.as_ptr(), b.copy.add(start), run.len()) };
                 (start..p).step_by(PAGE).for_each(|q| b.sent[q / PAGE / 64] |= 1 << (q / PAGE % 64));
             }
