@@ -80,7 +80,7 @@ pub fn unpack(pf: pipe_format, dst: &mut [u8], host: &Host, off: usize) {
 }
 
 /// The windows of the bound sets, the push constants and buffer sizes (slot WINDOWS) and the constant pool (slot WINDOWS + 2).
-fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
+fn gather(c: &CommandBuffer, pl: &Pipeline) -> Option<Vec<CsBuf>> {
     let mut bufs = Vec::new();
     let mut sizes = [0u32; WINDOWS as usize];
     // Each binding's base and offset limit (borgc's TABLE_BASE): its buffer, else its window.
@@ -110,21 +110,11 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let Some(map) = mapped(tb.memory()).filter(|_| pf != PIPE_FORMAT_NONE && bs != 0) else { continue };
                 // In place (borgc: borg_lower_image_in_place): the descriptor, base and element count.
                 if set.storage_mask >> b & 1 != 0 && unsafe { borg_lower_image_in_place(pf) } {
-                    let gpu = tb.memory().map_or(0, |m| m.gpu);
-                    let off = tb.offset + bv.offset;
-                    let max = if gpu != 0 { u32::MAX } else { (SLOT_BYTES - 64) / bs };
-                    let n = (bv.range / bs as u64).min(max as u64) as u32;
-                    let base = if gpu != 0 { gpu + off as u32 } else { addr + 64 };
-                    let mut data: Vec<u8> = [base, 0, 0, n, 1, 1].iter().flat_map(|v| v.to_ne_bytes()).collect();
+                    let gpu = tb.memory().map(|m| m.gpu).filter(|&g| g != 0)?;
+                    let n = (bv.range / bs as u64).min(u32::MAX as u64) as u32;
+                    let mut data: Vec<u8> = [gpu + (tb.offset + bv.offset) as u32, 0, 0, n, 1, 1].iter().flat_map(|v| v.to_ne_bytes()).collect();
                     data.resize(64, 0);
-                    if gpu != 0 {
-                        bufs.push(decoded(addr, data, 64));
-                        continue;
-                    }
-                    let at = unsafe { map.add(off as usize) };
-                    data.extend_from_slice(unsafe { std::slice::from_raw_parts(at, (n * bs) as usize) });
-                    let size = data.len() as u32;
-                    bufs.push(CsBuf { host: at, wb: true, skip: 64, ..decoded(addr, data, size) });
+                    bufs.push(decoded(addr, data, 64));
                     continue;
                 }
                 let n = (bv.range / bs as u64).min(SLOT_BYTES as u64 / 16 - 1) as u32;
@@ -190,20 +180,10 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                     let solid = img.vk.image_type == VK_IMAGE_TYPE_3D;
                     let step = if solid { pitch as u64 * h as u64 } else { sh.layer_size(blk) };
                     let n = if solid { d } else { nl };
-                    let bytes = if solid { step * d as u64 } else { step * nl as u64 } as usize;
-                    let gpu = img.memory().map_or(0, |m| m.gpu);
-                    let base = if gpu != 0 { gpu + (img.offset + off) as u32 } else { addr + 64 };
-                    let mut data: Vec<u8> = [base, pitch, step as u32, w, h, n].iter().flat_map(|v| v.to_ne_bytes()).collect();
+                    let gpu = img.memory().map(|m| m.gpu).filter(|&g| g != 0)?;
+                    let mut data: Vec<u8> = [gpu + (img.offset + off) as u32, pitch, step as u32, w, h, n].iter().flat_map(|v| v.to_ne_bytes()).collect();
                     data.resize(64, 0);
-                    if gpu != 0 || 64 + bytes > SLOT_BYTES as usize {
-                        let size = data.len() as u32;
-                        bufs.push(decoded(addr, data, size));
-                        continue;
-                    }
-                    let at = unsafe { src.add(off as usize) };
-                    data.extend_from_slice(unsafe { std::slice::from_raw_parts(at, bytes) });
-                    let size = data.len() as u32;
-                    bufs.push(CsBuf { host: at, wb: true, skip: 64, ..decoded(addr, data, size) });
+                    bufs.push(decoded(addr, data, 64));
                     continue;
                 }
                 let src = unsafe { src.add(off0 as usize) };
@@ -249,18 +229,12 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             let r = set.ranges[b];
             let whole = if r == VK_WHOLE_SIZE as u64 || r > avail { avail } else { r };
             let host = unsafe { map.add((b_.offset + off) as usize) };
-            // In the device heap the shader reads and writes the buffer where it is.
-            let gpu = b_.memory().map_or(0, |m| m.gpu);
-            if gpu != 0 {
-                let (addr, size) = (gpu + (b_.offset + off) as u32, whole.min(u32::MAX as u64 - 3) as u32);
-                sizes[window as usize] = size;
-                table[2 * window as usize..][..2].copy_from_slice(&[addr, (size.max(4) - 4) & !3]);
-                bufs.push(CsBuf { host, decoded: None, wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0), in_place: true });
-                continue;
-            }
-            let size = whole.min(SLOT_BYTES as u64) as u32;
+            // The shader reads and writes the buffer where it is.
+            let gpu = b_.memory().map(|m| m.gpu).filter(|&g| g != 0)?;
+            let (addr, size) = (gpu + (b_.offset + off) as u32, whole.min(u32::MAX as u64 - 3) as u32);
             sizes[window as usize] = size;
-            bufs.push(CsBuf { host, decoded: None, wb: true, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0), in_place: false });
+            table[2 * window as usize..][..2].copy_from_slice(&[addr, (size.max(4) - 4) & !3]);
+            bufs.push(CsBuf { host, decoded: None, wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0), in_place: true });
         }
     }
 
@@ -278,7 +252,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
         let len = n.len() as u32;
         bufs.push(decoded(TEX_BYTES, n, len));
     }
-    bufs
+    Some(bufs)
 }
 
 /// The texture window: descriptor k at 64 k, sampler k at SAMPLERS + 16 k, then each texture's texels.
@@ -460,7 +434,7 @@ fn dispatch(c: &mut CommandBuffer, gx: u32, gy: u32, gz: u32) {
     if gx == 0 || gy == 0 || gz == 0 || (direct.is_none() && !crate::hw::enabled()) {
         return;
     }
-    let bufs = gather(c, pl);
+    let Some(bufs) = gather(c, pl) else { return };
     let g = [gx, gy, gz];
     let job = build_job(pl, g, &bufs);
     let mut ran = true;
