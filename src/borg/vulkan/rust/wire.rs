@@ -141,15 +141,18 @@ fn stencil_face_pack(f: &VkStencilOpState) -> u32 {
 }
 
 /// STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG and CULL_CFG of a pipeline. Without
-/// state: no stencil, depth LESS with writes, back faces culled.
+/// state: no stencil, depth LESS with writes, back faces culled. Without a depth (stencil)
+/// attachment its test is off, as Vulkan has it.
 pub fn state_pack(ci: &VkGraphicsPipelineCreateInfo) -> [u32; 5] {
     let mut reg = [0, 0, 0, 1 | 1 << 3, 2];
     let rs = unsafe { ci.pRasterizationState.as_ref() };
+    let ri = unsafe { vk_get_pipeline_rendering_create_info(ci).as_ref() };
+    let (has_z, has_s) = ri.map_or((true, true), |r| (r.depthAttachmentFormat != VK_FORMAT_UNDEFINED, r.stencilAttachmentFormat != VK_FORMAT_UNDEFINED));
     if let Some(ds) = unsafe { ci.pDepthStencilState.as_ref() } {
-        let test = ds.depthTestEnable != 0;
+        let test = ds.depthTestEnable != 0 && has_z;
         let cmp = if test { ds.depthCompareOp as u32 & 7 } else { 7 };
         reg[3] = cmp | if test && ds.depthWriteEnable != 0 { 1 << 3 } else { 0 };
-        if ds.stencilTestEnable != 0 {
+        if ds.stencilTestEnable != 0 && has_s {
             let (f, b) = (&ds.front, &ds.back);
             let ops = |s: &VkStencilOpState| {
                 (s.compareOp as u32 & 7) | (s.failOp as u32 & 7) << 3 | (s.passOp as u32 & 7) << 6 | (s.depthFailOp as u32 & 7) << 9
