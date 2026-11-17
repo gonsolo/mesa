@@ -60,8 +60,9 @@ impl ShaderState {
             let nu = crate::block::NextUse::new(&self.sel.prog);
             let pick = vals
                 .iter()
+                // At a loop's head, its values live from the head on: they spill too.
                 .filter(|&&(v, d, l)| {
-                    d < at && l > at && weight(&v) == 1 && (!self.spill.exempt.contains(&v) || self.spill.held.contains_key(&v))
+                    (d < at || d == at && crate::block::starts_block(self.sel.prog[at].mnem)) && l > at && weight(&v) == 1 && (!self.spill.exempt.contains(&v) || self.spill.held.contains_key(&v))
                         && !self.out_roots.contains(&v) && scalar(v) && !self.sel.prog[at].srcs.contains(&v)
                 })
                 .map(|&(v, ..)| (v, nu.after(&self.sel.prog, at, v)))
