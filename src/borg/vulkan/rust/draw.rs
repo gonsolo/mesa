@@ -7,7 +7,7 @@
 use crate::cmd_buffer::CommandBuffer;
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash, hash_image};
 use crate::entrypoint::{entrypoint, Handle};
-use crate::descriptor_set::{find_flat, DescriptorSet};
+use crate::descriptor_set::{find_flat, in_layout, DescriptorSet};
 use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{Buffer, Host, ViewBuffer};
@@ -828,6 +828,7 @@ impl Ctx<'_> {
         let pl = self.pl;
         let set = self.c.desc_set;
         let (sets, c) = self.c.split_sets();
+        let sets = in_layout(sets, &pl.set_base);
         let (mut smask, mut any_dyn) = (0u128, false);
         for (si, s) in sets.iter().enumerate() {
             let Some(s) = s else { continue };

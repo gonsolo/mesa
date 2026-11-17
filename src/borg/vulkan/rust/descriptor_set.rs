@@ -119,10 +119,17 @@ pub fn layout_map(bindings: &[VkDescriptorSetLayoutBinding]) -> (DescMap, u64) {
     (m, dyn_mask)
 }
 
+pub const NO_SET: u8 = u8::MAX;
+
+/// The bound sets the pipeline's layout has; one left bound from another layout is not.
+pub fn in_layout<'a>(sets: [Option<&'a DescriptorSet>; 4], base: &[u8; 4]) -> [Option<&'a DescriptorSet>; 4] {
+    std::array::from_fn(|i| sets[i].filter(|_| base[i] != NO_SET))
+}
+
 /// The bound set holding flat slot `flat` and the slot within it.
 pub fn find_flat<'a>(sets: &[Option<&'a DescriptorSet>; 4], base: &[u8; 4], flat: u8) -> Option<(&'a DescriptorSet, usize)> {
     (0..4).rev().find_map(|si| {
-        let s = sets[si]?;
+        let s = sets[si].filter(|_| base[si] != NO_SET)?;
         let b = (flat as usize).checked_sub(base[si] as usize)?;
         (b < BINDINGS && (s.map.n == 0 || b < s.map.total as usize)).then_some((s, b))
     })

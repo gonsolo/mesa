@@ -4,7 +4,7 @@
 //! Shaders for pipelines: from the shader cache, or through NIR and borgc.
 
 #[cfg(borgc)]
-use crate::descriptor_set::DescriptorSetLayout;
+use crate::descriptor_set::{DescriptorSetLayout, NO_SET};
 use crate::ffi::*;
 #[cfg(not(borgc))]
 use crate::device::Device;
@@ -41,17 +41,17 @@ pub fn set_map(pl: &vk_pipeline_layout, s: usize) -> Option<&DescMap> {
     Some(unsafe { &(*l.cast::<DescriptorSetLayout>()).map })
 }
 
-/// The first flat descriptor slot of each of the first four sets.
+/// The first flat descriptor slot of each of the first four sets; NO_SET for a set the layout lacks.
 #[cfg(borgc)]
 pub fn set_base(sc: &Scratch) -> [u8; 4] {
-    let mut base = [0u8; 4];
     let Some(pl) = compile_layout(sc) else {
-        return base;
+        return [0; 4];
     };
+    let mut base = [NO_SET; 4];
     let mut at = 0u32;
     for (s, b) in base.iter_mut().enumerate().take(pl.set_count as usize) {
-        *b = at.min(255) as u8;
         if let Some(m) = set_map(pl, s) {
+            *b = at.min(NO_SET as u32 - 1) as u8;
             at += m.total as u32;
         }
     }

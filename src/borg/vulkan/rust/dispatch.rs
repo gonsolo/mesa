@@ -11,7 +11,7 @@ use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{Buffer, DeviceMemory, Host, ViewBuffer};
 use crate::pipeline::Pipeline;
-use crate::descriptor_set::{find_flat, DescriptorSet};
+use crate::descriptor_set::{find_flat, DescriptorSet, NO_SET};
 use crate::state_upload::DEFAULT_SAMPLER;
 use crate::texture_upload::{generic_texture, in_place};
 
@@ -89,7 +89,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Option<Vec<CsBuf>> {
     // Each binding's base and offset limit (borgc's TABLE_BASE): its buffer, else its window.
     let mut table: Vec<u32> = (0..WINDOWS).flat_map(|w| [BASE_BYTES + w * SLOT_BYTES, SLOT_BYTES - 4]).collect();
     for si in 0..4 {
-        let Some(set) = c.cs_set(si) else { continue };
+        let Some(set) = c.cs_set(si).filter(|_| pl.set_base[si] != NO_SET) else { continue };
         let dyn_off = &c.cs_dyn_offs[si];
         let base = pl.set_base[si] as u32;
         for b in 0..BORGVK_MAX_BINDINGS as usize {
