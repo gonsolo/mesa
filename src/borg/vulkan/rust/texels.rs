@@ -197,8 +197,8 @@ impl<'a> Texels<'a> {
     }
 
     /// Copies texel (x0, y0)'s stored bytes over the `w` x `h` rectangle from it, in the planes
-    /// `aspects` selects: a clear packs one texel, not each. Tiled images only; a tile's row of
-    /// four texels is one write.
+    /// `aspects` selects: a clear packs one texel, not each. Tiled images only; a band of whole
+    /// tiles is one write, else a tile's row of four texels.
     pub fn fill_from_first(&self, level: u32, layer: u32, [x0, y0, z]: [u32; 3], [w, h]: [u32; 2], smp: u32, aspects: VkImageAspectFlags) -> bool {
         let Kind::Tiled(t, planes) = &self.kind else { return false };
         let units = match *planes {
@@ -219,7 +219,20 @@ impl<'a> Texels<'a> {
                 return false;
             }
             let run = unit[..n].repeat(4);
-            for y in y0..y0 + h {
+            // Tile-aligned: a band of tiles, four rows high, is one stretch of memory.
+            let band = unit[..n].repeat(4 * w as usize);
+            let mut y = y0;
+            while y % 4 == 0 && x0 % 4 == 0 && w % 4 == 0 && y + 4 <= y0 + h {
+                let o = at(x0, y);
+                if at(x0 + w - 1, y + 3) != o + band.len() - n {
+                    break;
+                }
+                if !self.host.write(o, &band) {
+                    return false;
+                }
+                y += 4;
+            }
+            for y in y..y0 + h {
                 let mut x = x0;
                 while x < x0 + w {
                     let o = at(x, y);
