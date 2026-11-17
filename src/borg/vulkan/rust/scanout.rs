@@ -63,7 +63,8 @@ fn in_place(queue: VkQueue, info: *const VkPresentInfoKHR) -> Option<[u32; 4]> {
 /// frame, centred and cut to 640x480, to the next front buffer.
 pub fn present(queue: VkQueue, info: *const VkPresentInfoKHR) {
     let last = LAST.lock().unwrap_or_else(|p| p.into_inner()).take();
-    if !crate::hw::enabled() {
+    // Under KMS the kernel owns the scan-out.
+    if !crate::hw::enabled() || KMS.load(Ordering::Relaxed) {
         return;
     }
     if let Some(desc) = in_place(queue, info) {
