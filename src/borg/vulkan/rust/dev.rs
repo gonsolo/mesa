@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: MIT
 
 //! The Borg device the recorded lists run on (`BORGVK_HW`): the DRM render node (`BORG_HW_NODE`,
-//! default /dev/dri/renderD128), or on a host a `direct_sim` process (`BORG_HW_RAW`) or the
-//! pipes to one a launcher started (`BORG_HW_FDS=to,from`). Register writes and memory words are
-//! batched; a read or another kind of access sends the batch first.
+//! default /dev/dri/renderD128), or on a host the board's USB link or a `direct_sim` process
+//! (`BORG_HW_RAW`). Register writes and memory words are batched; a read or another kind of
+//! access sends the batch first.
 
 use crate::drm;
 use crate::ffi::*;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::os::fd::{FromRawFd, IntoRawFd};
+use std::os::fd::IntoRawFd;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
@@ -19,8 +19,8 @@ const MAX_MEM: usize = 4096;
 
 enum Link {
     Drm(i32),
-    /// A simulator, and its process when this device started it.
-    Pipe(Box<dyn Write + Send>, Box<dyn Read + Send>, Option<Child>),
+    /// The process behind the USB link or the simulator, and its pipes.
+    Pipe(Box<dyn Write + Send>, Box<dyn Read + Send>, Child),
 }
 
 pub struct Dev {
@@ -43,17 +43,10 @@ pub fn with<R>(f: impl FnOnce(&mut Dev) -> R) -> Option<R> {
 }
 
 fn open() -> Option<Dev> {
-    let fds = std::env::var("BORG_HW_FDS").ok().and_then(|v| {
-        let (a, b) = v.split_once(',')?;
-        Some((a.parse::<i32>().ok()?, b.parse::<i32>().ok()?))
-    });
-    let link = if let Some((to, from)) = fds {
-        let (to, from) = unsafe { (File::from_raw_fd(to), File::from_raw_fd(from)) };
-        Link::Pipe(Box::new(to), Box::new(from), None)
-    } else if let Some(raw) = std::env::var_os("BORG_HW_RAW") {
+    let link = if let Some(raw) = std::env::var_os("BORG_HW_RAW") {
         let mut c = Command::new(raw).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
         let (to, from) = (c.stdin.take()?, c.stdout.take()?);
-        let mut d = Dev::new(Link::Pipe(Box::new(to), Box::new(from), Some(c)));
+        let mut d = Dev::new(Link::Pipe(Box::new(to), Box::new(from), c));
         d.dirty(); // what an earlier session left
         return Some(d);
     } else {
@@ -78,7 +71,7 @@ pub fn spawn(bin: &std::ffi::OsStr) -> Option<Dev> {
     }
     let mut c = c.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
     let (to, from) = (c.stdin.take()?, c.stdout.take()?);
-    Some(Dev::new(Link::Pipe(Box::new(to), Box::new(from), Some(c))))
+    Some(Dev::new(Link::Pipe(Box::new(to), Box::new(from), c)))
 }
 
 impl Dev {
@@ -262,7 +255,7 @@ impl crate::list::Gpu for Dev {
 
 impl Drop for Dev {
     fn drop(&mut self) {
-        if let Link::Pipe(to, _, Some(c)) = &mut self.link {
+        if let Link::Pipe(to, _, c) = &mut self.link {
             *to = Box::new(std::io::sink());
             let _ = c.wait();
         }
