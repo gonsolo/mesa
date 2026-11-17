@@ -195,6 +195,44 @@ impl<'a> Texels<'a> {
             }
         }
     }
+
+    /// Copies texel (x0, y0)'s stored bytes over the `w` x `h` rectangle from it, in the planes
+    /// `aspects` selects: a clear packs one texel, not each. Tiled images only; a tile's row of
+    /// four texels is one write.
+    pub fn fill_from_first(&self, level: u32, layer: u32, [x0, y0, z]: [u32; 3], [w, h]: [u32; 2], smp: u32, aspects: VkImageAspectFlags) -> bool {
+        let Kind::Tiled(t, planes) = &self.kind else { return false };
+        let units = match *planes {
+            Planes::Color if self.bs <= 8 => vec![(0, self.bs)],
+            Planes::Color => return false,
+            Planes::Stencil => vec![(0, 1)],
+            Planes::Depth { z16, stencil } => {
+                let depth = (aspects & VK_IMAGE_ASPECT_DEPTH_BIT != 0).then_some((0, if z16 { 2 } else { 4 }));
+                let s = (stencil && aspects & VK_IMAGE_ASPECT_STENCIL_BIT != 0).then_some((1, 1));
+                depth.into_iter().chain(s).collect()
+            }
+        };
+        let layer = if self.is3d { 0 } else { layer };
+        for (p, n) in units {
+            let at = |x: u32, y: u32| t.texel(p, level, layer, [x, y, z], smp) as usize;
+            let mut unit = [0u8; 8];
+            if !self.host.read(at(x0, y0), &mut unit[..n]) {
+                return false;
+            }
+            let run = unit[..n].repeat(4);
+            for y in y0..y0 + h {
+                let mut x = x0;
+                while x < x0 + w {
+                    let o = at(x, y);
+                    let four = x % 4 == 0 && x + 4 <= x0 + w && at(x + 3, y) == o + 3 * n;
+                    if !self.host.write(o, if four { &run } else { &run[..n] }) {
+                        return false;
+                    }
+                    x += if four { 4 } else { 1 };
+                }
+            }
+        }
+        true
+    }
 }
 
 /// Calls `f` with every texel of a tiled image and its offset in the linear layout.

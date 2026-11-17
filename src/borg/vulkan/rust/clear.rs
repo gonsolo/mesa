@@ -97,13 +97,23 @@ pub fn clear_rect(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkCl
         let layer = view.base_array_layer + base_layer + l;
         let (layer, z) = if is3d { (0, layer) } else { (layer, 0) };
         for s in 0..image.vk.samples.max(1) {
+            let one = |x: u32, y: u32| {
+                if color {
+                    t.write(view.base_mip_level, layer, [x, y, z], s, &pixel);
+                } else {
+                    write_ds(&t, (view.base_mip_level, layer, [x, y, z], s), pf, aspect, &ds);
+                }
+            };
+            if w == 0 || h == 0 {
+                continue;
+            }
+            one(x0, y0);
+            if t.fill_from_first(view.base_mip_level, layer, [x0, y0, z], [w, h], s, aspect) {
+                continue;
+            }
             for y in y0..y0.wrapping_add(h) {
                 for x in x0..x0.wrapping_add(w) {
-                    if color {
-                        t.write(view.base_mip_level, layer, [x, y, z], s, &pixel);
-                    } else {
-                        write_ds(&t, (view.base_mip_level, layer, [x, y, z], s), pf, aspect, &ds);
-                    }
+                    one(x, y);
                 }
             }
         }
