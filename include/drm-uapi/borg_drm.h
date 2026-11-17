@@ -45,11 +45,11 @@ struct drm_borg_mem {
    uint32_t length;
 };
 
-/* Allocate a GEM buffer object backed by anonymous memory. */
+/* Allocate a GEM buffer object in Borg's memory. */
 struct drm_borg_gem_create {
    uint64_t size;     /* in:  allocation size in bytes           */
    uint32_t handle;   /* out: GEM handle                         */
-   uint32_t pad;
+   uint32_t gpu;      /* out: its GPU address, 0 for none        */
 };
 
 /* Get the mmap offset for a GEM handle. Pass offset to mmap(drm_fd). */

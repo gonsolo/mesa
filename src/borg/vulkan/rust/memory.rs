@@ -162,8 +162,8 @@ impl Default for DeviceMemory {
     }
 }
 
-/// Backing for `size` bytes and its GEM handle, 0 for malloc'd memory; a GEM object for a dma-buf
-/// export.
+/// Backing for `size` bytes, its GEM handle (0 for malloc'd memory) and GPU address (0 for none); a
+/// GEM object for a dma-buf export.
 fn back(dev: &Device, size: usize, export: bool) -> Result<(*mut c_void, u32, u32), VkResult> {
     if let Some(h) = crate::heap::get().filter(|_| !export) {
         let (map, gpu) = h.alloc(size).ok_or(VK_ERROR_OUT_OF_DEVICE_MEMORY)?;
@@ -188,7 +188,7 @@ fn back(dev: &Device, size: usize, export: bool) -> Result<(*mut c_void, u32, u3
         gem_close(fd, create.handle);
         return Err(VK_ERROR_OUT_OF_HOST_MEMORY);
     }
-    Ok((map, create.handle, 0))
+    Ok((map, create.handle, create.gpu))
 }
 
 pointee!(VkMemoryAllocateInfo, VkMemoryGetFdInfoKHR, VkMemoryFdPropertiesKHR, VkMemoryMapInfo, VkBufferCreateInfo, VkBufferViewCreateInfo, VkDeviceBufferMemoryRequirements, VkMemoryRequirements2, *mut c_void);
