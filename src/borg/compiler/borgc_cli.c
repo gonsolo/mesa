@@ -34,9 +34,9 @@ static void
 usage(const char *argv0)
 {
    fprintf(stderr,
-      "usage: %s [-s vert|frag] [-e entry] [-f frag.spv] [-n name] [-H out.h] [-o out.borg] in.spv\n"
+      "usage: %s [-s vert|frag|comp] [-e entry] [-f frag.spv] [-n name] [-H out.h] [-o out.borg] in.spv\n"
       "\n"
-      "  -s  shader stage (default: vert)\n"
+      "  -s  shader stage (default: the entry point's in the SPIR-V)\n"
       "  -e  SPIR-V entry point (default: main)\n"
       "  -f  the fragment shader a vertex shader is paired with (its per-draw work moves here)\n"
       "  -n  C identifier for -H output (default: derived from -o)\n"
@@ -45,6 +45,22 @@ usage(const char *argv0)
       "\n"
       "Environment: BORGC_DEBUG, BORGC_DUMP_NIR, BORGC_DUMP_ISA, BORGC_FRAG_ALPHA\n",
       argv0);
+}
+
+/* The stage of `entry`'s OpEntryPoint (vertex, fragment or GLCompute), or MESA_SHADER_NONE. */
+static mesa_shader_stage
+spirv_stage(const uint32_t *w, size_t n, const char *entry)
+{
+   for (size_t i = 5; i < n && w[i] >> 16; i += w[i] >> 16) {
+      if ((w[i] & 0xffff) != 15 || (w[i] >> 16) < 4 || strncmp((const char *)&w[i + 3], entry, ((w[i] >> 16) - 3) * 4))
+         continue;
+      switch (w[i + 1]) {
+      case 0: return MESA_SHADER_VERTEX;
+      case 4: return MESA_SHADER_FRAGMENT;
+      case 5: return MESA_SHADER_COMPUTE;
+      }
+   }
+   return MESA_SHADER_NONE;
 }
 
 static uint32_t *
@@ -104,7 +120,7 @@ write_header(const char *path, const char *name, const uint8_t *blob, uint32_t l
 int
 main(int argc, char **argv)
 {
-   const char *stage_name = "vert", *entry = "main", *out = NULL;
+   const char *stage_name = NULL, *entry = "main", *out = NULL;
    const char *hdr = NULL, *name = NULL, *in = NULL, *frag = NULL;
 
    for (int i = 1; i < argc; i++) {
@@ -119,18 +135,25 @@ main(int argc, char **argv)
    }
    if (!in) { usage(argv[0]); return 2; }
 
-   mesa_shader_stage stage;
-   if (!strcmp(stage_name, "vert"))      stage = MESA_SHADER_VERTEX;
-   else if (!strcmp(stage_name, "frag")) stage = MESA_SHADER_FRAGMENT;
-   else if (!strcmp(stage_name, "comp")) stage = MESA_SHADER_COMPUTE;
-   else {
-      fprintf(stderr, "borgc-cli: unknown stage '%s' (vert|frag)\n", stage_name);
-      return 2;
-   }
-
    size_t words = 0;
    uint32_t *spirv = read_spirv(in, &words);
    if (!spirv) return 1;
+
+   mesa_shader_stage stage = spirv_stage(spirv, words, entry);
+   if (!stage_name)                      stage_name = stage == MESA_SHADER_COMPUTE ? "comp" : stage == MESA_SHADER_FRAGMENT ? "frag" : "vert";
+   else if (!strcmp(stage_name, "vert")) stage = MESA_SHADER_VERTEX;
+   else if (!strcmp(stage_name, "frag")) stage = MESA_SHADER_FRAGMENT;
+   else if (!strcmp(stage_name, "comp")) stage = MESA_SHADER_COMPUTE;
+   else {
+      fprintf(stderr, "borgc-cli: unknown stage '%s' (vert|frag|comp)\n", stage_name);
+      free(spirv);
+      return 2;
+   }
+   if (stage == MESA_SHADER_NONE) {
+      fprintf(stderr, "borgc-cli: %s has no vertex, fragment or compute entry point '%s'\n", in, entry);
+      free(spirv);
+      return 1;
+   }
 
    glsl_type_singleton_init_or_ref();
 
