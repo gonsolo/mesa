@@ -67,7 +67,8 @@ pub struct Texels<'a> {
 impl<'a> Texels<'a> {
     pub fn of(img: &'a Image) -> Option<Self> {
         let shape = crate::image::shape(img);
-        let kind = match planes(img.vk.format, img.vk.tiling, img.vk.usage as VkImageUsageFlags) {
+        let tiling = crate::modifier::effective(img.vk.tiling, img.vk.drm_format_mod);
+        let kind = match planes(img.vk.format, tiling, img.vk.usage as VkImageUsageFlags) {
             Some(p) => Kind::Tiled(Tiled { plane1: img.plane1, ..tiled_layout(shape, img.vk.format, p) }, p),
             None => Kind::Linear(shape, blocks(img.vk.format)),
         };

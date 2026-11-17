@@ -179,7 +179,7 @@ fn texel_buffer_features(f: VkFormat) -> VkFormatFeatureFlags {
 }
 
 /// Linear-tiling, optimal-tiling and buffer features.
-fn format_properties(f: VkFormat) -> VkFormatProperties {
+pub fn format_properties(f: VkFormat) -> VkFormatProperties {
     let opt = optimal_features(f);
     let (ds, bc) = (is_depth_stencil(f), is_bc(f));
     let mut lin = if opt != 0 && !bc { VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT } else { 0 };
@@ -204,10 +204,41 @@ entrypoint! {
                 p3.optimalTilingFeatures |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT;
             }
         }
+        let mods = crate::modifier::of(format, &p);
+        if let Some(l) = unsafe { find_out::<VkDrmFormatModifierPropertiesListEXT>(props.pNext, VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT) } {
+            let out = l.pDrmFormatModifierProperties;
+            let n = if out.is_null() { mods.len() } else { mods.len().min(l.drmFormatModifierCount as usize) };
+            for (i, &(m, f)) in mods.iter().take(n).enumerate().filter(|_| !out.is_null()) {
+                unsafe { *out.add(i) = VkDrmFormatModifierPropertiesEXT { drmFormatModifier: m, drmFormatModifierPlaneCount: 1, drmFormatModifierTilingFeatures: f } };
+            }
+            l.drmFormatModifierCount = n as u32;
+        }
+        if let Some(l) = unsafe { find_out::<VkDrmFormatModifierPropertiesList2EXT>(props.pNext, VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT) } {
+            let out = l.pDrmFormatModifierProperties;
+            let n = if out.is_null() { mods.len() } else { mods.len().min(l.drmFormatModifierCount as usize) };
+            for (i, &(m, f)) in mods.iter().take(n).enumerate().filter(|_| !out.is_null()) {
+                unsafe { *out.add(i) = VkDrmFormatModifierProperties2EXT { drmFormatModifier: m, drmFormatModifierPlaneCount: 1, drmFormatModifierTilingFeatures: f as u64 } };
+            }
+            l.drmFormatModifierCount = n as u32;
+        }
     }
 }
 
 fn image_format_properties(info: &VkPhysicalDeviceImageFormatInfo2) -> Result<VkImageFormatProperties, VkResult> {
+    if info.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT {
+        let stype = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT;
+        let m = unsafe { find_out::<VkPhysicalDeviceImageDrmFormatModifierInfoEXT>(info.pNext.cast_mut(), stype) }.map(|m| m.drmFormatModifier);
+        let known = m.filter(|&m| crate::modifier::of(info.format, &format_properties(info.format)).iter().any(|&(k, _)| k == m));
+        let tiling = known.and_then(crate::modifier::tiling).ok_or(VK_ERROR_FORMAT_NOT_SUPPORTED)?;
+        let p = image_format_properties(&VkPhysicalDeviceImageFormatInfo2 { tiling, ..*info })?;
+        if m != Some(crate::modifier::TILED) {
+            return Ok(p);
+        }
+        if !crate::modifier::tiled_ok(info.usage, 1, 1, 1) {
+            return Err(VK_ERROR_FORMAT_NOT_SUPPORTED);
+        }
+        return Ok(VkImageFormatProperties { maxMipLevels: 1, maxArrayLayers: 1, sampleCounts: VK_SAMPLE_COUNT_1_BIT, ..p });
+    }
     let fp = format_properties(info.format);
     let feats = if info.tiling == VK_IMAGE_TILING_LINEAR { fp.linearTilingFeatures } else { fp.optimalTilingFeatures };
     let usage = info.usage;
@@ -392,6 +423,7 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
             extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_external_memory = true;
             extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_external_memory_fd = true;
             extensions.__bindgen_anon_1.__bindgen_anon_1.EXT_external_memory_dma_buf = true;
+            extensions.__bindgen_anon_1.__bindgen_anon_1.EXT_image_drm_format_modifier = true;
         }
         extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_16bit_storage = true;
         extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_storage_buffer_storage_class = true;

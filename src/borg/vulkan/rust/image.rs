@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::device::Device;
-use crate::entrypoint::{entrypoint, handle, pointee, vk_error, Handle};
+use crate::entrypoint::{chain, entrypoint, handle, pointee, slice, vk_error, Handle};
 use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{DeviceMemory, Host};
@@ -71,17 +71,43 @@ pub fn aspect_blocks(fmt: VkFormat, aspect: VkImageAspectFlags) -> Blocks {
     Blocks { bd: blocks(fmt).bd, ..blocks(a) }
 }
 
-fn size(i: &VkImageCreateInfo) -> u64 {
+fn size(i: &VkImageCreateInfo, tiling: VkImageTiling) -> u64 {
     let e = i.extent;
     let s = Shape { extent: [e.width, e.height, e.depth], levels: i.mipLevels, layers: i.arrayLayers, samples: i.samples };
-    match crate::texels::planes(i.format, i.tiling, i.usage) {
+    match crate::texels::planes(i.format, tiling, i.usage) {
         Some(p) => crate::texels::tiled_layout(Shape { levels: s.levels.max(1), ..s }, i.format, p).size(),
         None => s.size(blocks(i.format)),
     }
 }
 
+/// The modifier an image of `info` with DRM format modifier tiling is laid out in: the first of
+/// the app's list borgvk has, or the explicit one.
+fn modifier(info: &VkImageCreateInfo) -> Option<u64> {
+    let props = crate::physical_device::format_properties(info.format);
+    let fits = |m: u64| {
+        crate::modifier::of(info.format, &props).iter().any(|&(k, _)| k == m)
+            && (m != crate::modifier::TILED || crate::modifier::tiled_ok(info.usage, info.mipLevels, info.arrayLayers, info.samples))
+    };
+    for s in unsafe { chain(info.pNext.cast_mut()) } {
+        match unsafe { (*s).sType } {
+            VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT => {
+                let l = unsafe { &*s.cast::<VkImageDrmFormatModifierListCreateInfoEXT>() };
+                return unsafe { slice(l.pDrmFormatModifiers, l.drmFormatModifierCount) }.iter().copied().find(|&m| fits(m));
+            }
+            VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT => {
+                let e = unsafe { &*s.cast::<VkImageDrmFormatModifierExplicitCreateInfoEXT>() };
+                return Some(e.drmFormatModifier).filter(|&m| fits(m));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn subresource_layout(image: &Image, sub: &VkImageSubresource) -> VkSubresourceLayout {
-    let b = aspect_blocks(image.vk.format, sub.aspectMask);
+    // A modifier's memory plane 0 is the colour.
+    let aspect = if sub.aspectMask & VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT != 0 { VK_IMAGE_ASPECT_COLOR_BIT } else { sub.aspectMask };
+    let b = aspect_blocks(image.vk.format, aspect);
     let level = sub.mipLevel;
     let (offset, stride) = shape(image).level_offset(level, sub.arrayLayer, b);
     let dim = |e: u32, block: u32| e.checked_shr(level).unwrap_or(0).max(1).div_ceil(block) as u64;
@@ -100,9 +126,17 @@ pointee!(VkImageCreateInfo, VkImageMemoryRequirementsInfo2, VkImageSubresource2K
 
 entrypoint! {
     fn borgvk_CreateImage(device: &Device, info: &VkImageCreateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkImage) -> Result<(), VkError> {
+        let m = if info.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT {
+            Some(modifier(info).ok_or_else(|| vk_error!(device, VK_ERROR_INITIALIZATION_FAILED))?)
+        } else {
+            None
+        };
         let image = unsafe { allocate::<Image>(|n| vk_image_create(device.vk_ptr(), info, alloc, n)) };
         let image = image.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
-        image.size = size(info);
+        if let Some(m) = m {
+            image.vk.drm_format_mod = m;
+        }
+        image.size = size(info, crate::modifier::effective(info.tiling, image.vk.drm_format_mod));
         *out = VkImage::from_object(image);
         Ok(())
     }

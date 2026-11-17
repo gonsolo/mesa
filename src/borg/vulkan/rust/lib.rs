@@ -36,6 +36,7 @@ mod nir_passes;
 mod object;
 mod image;
 mod memory;
+mod modifier;
 mod physical_device;
 mod pipeline;
 mod query;

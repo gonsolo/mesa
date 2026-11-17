@@ -117,6 +117,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'mesa_vk_dynamic_graphics_state|VkDraw(Indexed)?IndirectCommand|VkDispatchIndirectCommand',
     '--allowlist-type', 'VkFormatFeatureFlagBits|VkImageCreateFlagBits|VkFormatProperties[23]|VkPhysicalDeviceImageFormatInfo2|VkImageFormatProperties2|VkPhysicalDeviceSparseImageFormatInfo2|VkSparseImageFormatProperties2|VkPhysicalDeviceExternalBufferInfo|VkExternalBufferProperties',
     '--allowlist-var', 'VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT',
+    '--allowlist-type', 'VkDrmFormatModifierProperties(2)?EXT|VkDrmFormatModifierPropertiesList(2)?EXT|VkPhysicalDeviceImageDrmFormatModifierInfoEXT|VkImageDrmFormatModifier(List|Explicit)CreateInfoEXT',
     '--allowlist-function', 'vk_physical_device_(init|finish|dispatch_table_from_entrypoints)|drm(Get|Free)Version|close',
     '--allowlist-type', 'vk_properties|vk_features|vk_device_extension_table|VkQueueFamilyProperties2|VkPhysicalDeviceMemoryProperties2|VkQueueFlagBits|VkMemoryHeapFlagBits|VkMemoryPropertyFlagBits|VkDriverId|VkPhysicalDeviceType',
     '--allowlist-var', '(borgvk|wsi)_(instance|physical_device|device)_entrypoints',
