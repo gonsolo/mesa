@@ -70,7 +70,10 @@ fn decoded(addr: u32, data: Vec<u8>, size: u32) -> CsBuf {
 }
 
 fn mapped(mem: Option<&DeviceMemory>) -> Option<*mut u8> {
-    mem.filter(|m| !m.map.is_null()).map(|m| m.map.cast())
+    mem.filter(|m| !m.map.is_null()).map(|m| {
+        crate::memory::host_reads(m);
+        m.map.cast()
+    })
 }
 
 /// The texel at `off` of `host` as RGBA32 in the first 16 bytes of `dst`.

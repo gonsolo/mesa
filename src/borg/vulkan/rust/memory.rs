@@ -70,6 +70,7 @@ pub struct Host<'a> {
 impl<'a> Host<'a> {
     pub(crate) fn of(mem: Option<&'a DeviceMemory>, offset: VkDeviceSize) -> Option<Self> {
         let m = mem.filter(|m| !m.map.is_null())?;
+        host_reads(m);
         let off = offset as usize;
         Some(Host { base: m.map.cast::<u8>().wrapping_add(off), len: m.size.saturating_sub(off), mem: PhantomData })
     }
@@ -153,6 +154,13 @@ pub trait ViewBuffer {
 impl ViewBuffer for vk_buffer_view {
     fn buffer(&self) -> Option<&Buffer> {
         unsafe { self.buffer.cast::<Buffer>().as_ref() }
+    }
+}
+
+/// The host reads `m` from now on (heap::Heap::touch).
+pub fn host_reads(m: &DeviceMemory) {
+    if m.gpu != 0 {
+        crate::heap::get().inspect(|h| h.touch(m.gpu, m.size));
     }
 }
 
@@ -255,6 +263,7 @@ entrypoint! {
 entrypoint! {
     fn borgvk_MapMemory2(_device: VkDevice, info: &VkMemoryMapInfo, out: &mut *mut c_void) -> VkResult {
         let mem = unsafe { info.memory.get() }.unwrap();
+        host_reads(mem);
         *out = mem.map.wrapping_byte_add(info.offset as usize);
         VK_SUCCESS
     }

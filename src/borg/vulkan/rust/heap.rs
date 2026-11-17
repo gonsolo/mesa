@@ -3,7 +3,8 @@
 
 //! The device heap at BORG_DEVICE_BASE on the GPU: one memfd the driver and every simulator
 //! process map, or, over the board's USB link (BORG_HW_RAW), the host's side of the board's DDR,
-//! synced at each job. Device memory is carved from it in pages, first fit.
+//! synced at each job: what Borg writes comes back only for memory the host has read, mapped or
+//! touched (`touch`). Device memory is carved from it in pages, first fit.
 
 use crate::ffi::*;
 use crate::util::{ftruncate, mmap};
@@ -19,10 +20,22 @@ pub struct Heap {
     board: Option<Mutex<Board>>,
 }
 
-/// What the board holds of the heap: a copy of every page it got, and which pages those are.
+/// What the board holds of the heap: a copy of every page it got, which pages those are, the
+/// pages the host reads (mirrored after each job) and the ones Borg wrote that are not yet back.
 struct Board {
     copy: *mut u8,
     sent: Vec<u64>,
+    mirror: Vec<u64>,
+    stale: Vec<u64>,
+}
+
+fn bit(v: &[u64], p: usize) -> bool {
+    v[p / PAGE / 64] >> (p / PAGE % 64) & 1 != 0
+}
+
+fn set(v: &mut [u64], p: usize, on: bool) {
+    let (w, b) = (p / PAGE / 64, 1u64 << (p / PAGE % 64));
+    v[w] = if on { v[w] | b } else { v[w] & !b };
 }
 
 // The mapping lives as long as the process; the free list is behind its lock.
@@ -54,7 +67,8 @@ pub fn get() -> Option<&'static Heap> {
             if c as usize == usize::MAX {
                 return None;
             }
-            Some(Mutex::new(Board { copy: c.cast(), sent: vec![0; BYTES / PAGE / 64] }))
+            let pages = vec![0; BYTES / PAGE / 64];
+            Some(Mutex::new(Board { copy: c.cast(), sent: pages.clone(), mirror: pages.clone(), stale: pages }))
         } else {
             None
         };
@@ -129,7 +143,8 @@ impl Heap {
         }
     }
 
-    /// After a job on the board: the allocated pages Borg wrote, into the heap and the copy.
+    /// After a job on the board: the allocated pages Borg wrote, into the heap and the copy where
+    /// the host reads them, else marked stale.
     pub fn from_board(&self, d: &mut crate::dev::Dev) {
         let Some(b) = &self.board else { return };
         let mut b = b.lock().unwrap_or_else(|e| e.into_inner());
@@ -139,28 +154,61 @@ impl Heap {
             bits[page / 8] >> (page % 8) & 1 != 0
         };
         for (off, len) in self.used() {
-            let mut p = off;
-            while p < off + len {
-                let start = p;
-                while p < off + len && dirty(p) {
-                    p += PAGE;
-                }
-                if p == start {
-                    p += PAGE;
-                    continue;
-                }
-                let run = unsafe { std::slice::from_raw_parts_mut(self.base.add(start), p - start) };
-                d.mem_read(BORG_DEVICE_BASE + start as u32, run);
-                unsafe { std::ptr::copy_nonoverlapping(run.as_ptr(), b.copy.add(start), run.len()) };
-                (start..p).step_by(PAGE).for_each(|q| b.sent[q / PAGE / 64] |= 1 << (q / PAGE % 64));
+            let stale: Vec<usize> = (off..off + len).step_by(PAGE).filter(|&p| dirty(p) && !bit(&b.mirror, p)).collect();
+            stale.into_iter().for_each(|p| set(&mut b.stale, p, true));
+            self.fetch(d, &mut b, off, len, |b, p| dirty(p) && bit(&b.mirror, p));
+        }
+    }
+
+    /// The pages of `off..off + len` that `want`, from the board into the heap and the copy.
+    fn fetch(&self, d: &mut crate::dev::Dev, b: &mut Board, off: usize, len: usize, want: impl Fn(&Board, usize) -> bool) {
+        let mut p = off;
+        while p < off + len {
+            let start = p;
+            while p < off + len && want(b, p) {
+                p += PAGE;
+            }
+            if p == start {
+                p += PAGE;
+                continue;
+            }
+            let run = unsafe { std::slice::from_raw_parts_mut(self.base.add(start), p - start) };
+            d.mem_read(BORG_DEVICE_BASE + start as u32, run);
+            unsafe { std::ptr::copy_nonoverlapping(run.as_ptr(), b.copy.add(start), run.len()) };
+            (start..p).step_by(PAGE).for_each(|q| {
+                set(&mut b.sent, q, true);
+                set(&mut b.stale, q, false);
+            });
+        }
+    }
+
+    /// The host reads `size` bytes at `gpu` from now on: what Borg wrote there comes back, now
+    /// and after every job.
+    pub fn touch(&self, gpu: u32, size: usize) {
+        let Some(off) = gpu.checked_sub(BORG_DEVICE_BASE).map(|o| o as usize) else { return };
+        let Some(board) = &self.board else { return };
+        let n = size.max(1).next_multiple_of(PAGE).min(BYTES.saturating_sub(off));
+        {
+            let b = board.lock().unwrap_or_else(|e| e.into_inner());
+            if (off..off + n).step_by(PAGE).all(|p| bit(&b.mirror, p)) {
+                return;
             }
         }
+        crate::dev::with(|d| {
+            let mut b = board.lock().unwrap_or_else(|e| e.into_inner());
+            self.fetch(d, &mut b, off, n, |b, p| bit(&b.stale, p));
+            (off..off + n).step_by(PAGE).for_each(|p| set(&mut b.mirror, p, true));
+        });
     }
 
     /// Gives back what `alloc` returned; the pages go back to the system, so they read as zeros.
     pub fn free(&self, gpu: u32, size: usize) {
         let (off, n) = ((gpu - BORG_DEVICE_BASE) as usize, size.max(1).next_multiple_of(PAGE));
         unsafe { madvise(self.base.add(off).cast(), n, MADV_REMOVE as i32) };
+        if let Some(b) = &self.board {
+            let mut b = b.lock().unwrap_or_else(|e| e.into_inner());
+            (off..off + n).step_by(PAGE).for_each(|p| (set(&mut b.mirror, p, false), set(&mut b.stale, p, false)).1);
+        }
         let mut f = self.free.lock().unwrap_or_else(|e| e.into_inner());
         let i = f.partition_point(|&(o, _)| o < off);
         f.insert(i, (off, n));
