@@ -33,7 +33,9 @@ pub fn wsi_init(p: &mut PhysicalDevice) -> VkResult {
     }
     if fd >= 0 {
         p.wsi_device.can_present_on_device = Some(present_on_borg);
-        // Optimal images are tiled: the display gets a linear copy.
+        // Swapchain images take the plane's modifiers: the display shows Borg's tiles in place.
+        // Without them, optimal images are tiled and the display gets a linear copy.
+        p.wsi_device.supports_modifiers = true;
         p.wsi_device.supports_scanout = false;
         crate::scanout::KMS.store(true, std::sync::atomic::Ordering::Relaxed);
     }
