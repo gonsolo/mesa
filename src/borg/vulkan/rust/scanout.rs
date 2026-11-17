@@ -3,7 +3,7 @@
 //! The board's HDMI scan-out (MigScanout): on real hardware, the frame WSI copied out for a
 //! present goes to one of two front buffers, and the descriptor at BORG_SCANOUT_SPI points at it.
 
-use crate::entrypoint::entrypoint;
+use crate::entrypoint::{entrypoint, Handle};
 use crate::ffi::*;
 use crate::image::Image;
 use std::sync::Mutex;
@@ -36,9 +36,41 @@ pub fn copied(img: &Image, row_length: u32, extent: [u32; 3], bytes: impl FnOnce
     }
 }
 
-/// After a present: the last copied frame, centred and cut to 640x480, to the next front buffer.
-pub fn present() {
-    let Some(f) = LAST.lock().unwrap_or_else(|p| p.into_inner()).take() else { return };
+/// The descriptor that shows the presented image where Borg rendered it: a tiled BGRA8 or RGBA8
+/// image of one sample in the device heap, at most 640x480.
+fn in_place(queue: VkQueue, info: *const VkPresentInfoKHR) -> Option<[u32; 4]> {
+    let info = unsafe { info.as_ref() }?;
+    if info.swapchainCount != 1 {
+        return None;
+    }
+    let device = unsafe { (*queue.cast::<vk_queue>()).base.device }.cast();
+    let (sc, idx) = unsafe { (*info.pSwapchains, *info.pImageIndices) };
+    let mut n = 0u32;
+    unsafe { wsi_GetSwapchainImagesKHR(device, sc, &mut n, std::ptr::null_mut()) };
+    let mut images = vec![VkImage::default(); n as usize];
+    unsafe { wsi_GetSwapchainImagesKHR(device, sc, &mut n, images.as_mut_ptr()) };
+    let img: &Image = unsafe { images.get(idx as usize)?.get_ref() }?;
+    let bgra = matches!(img.vk.format, VK_FORMAT_B8G8R8A8_UNORM | VK_FORMAT_B8G8R8A8_SRGB);
+    let rgba = matches!(img.vk.format, VK_FORMAT_R8G8B8A8_UNORM | VK_FORMAT_R8G8B8A8_SRGB);
+    let (w, h) = (img.vk.extent.width, img.vk.extent.height);
+    let gpu = img.memory().map(|m| m.gpu).filter(|&g| g != 0)?;
+    let tiled = crate::texels::Texels::of(img)?.tiled().is_some_and(|(_, p)| matches!(p, crate::texels::Planes::Color));
+    ((bgra || rgba) && tiled && img.vk.samples <= 1 && w <= 640 && h <= 480)
+        .then(|| [gpu + img.offset as u32, w.div_ceil(4) * 64, w | h << 16, if bgra { 1 } else { 2 } | 4])
+}
+
+/// After a present: the image itself when the scan-out can show it in place, else the last copied
+/// frame, centred and cut to 640x480, to the next front buffer.
+pub fn present(queue: VkQueue, info: *const VkPresentInfoKHR) {
+    let last = LAST.lock().unwrap_or_else(|p| p.into_inner()).take();
+    if !crate::hw::enabled() {
+        return;
+    }
+    if let Some(desc) = in_place(queue, info) {
+        crate::dev::with(|d| d.mem_write(BORG_SCANOUT_SPI, &desc.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()));
+        return;
+    }
+    let Some(f) = last else { return };
     let (w, h) = (f.w.min(640), f.h.min(480));
     let (x0, y0) = ((f.w - w) / 2, (f.h - h) / 2);
     let pitch = (w * 4).next_multiple_of(16);
@@ -59,12 +91,13 @@ pub fn present() {
 #[allow(unsafe_code)]
 unsafe extern "C" {
     fn wsi_QueuePresentKHR(queue: VkQueue, info: *const std::ffi::c_void) -> VkResult;
+    fn wsi_GetSwapchainImagesKHR(device: VkDevice, sc: VkSwapchainKHR, n: *mut u32, images: *mut VkImage) -> VkResult;
 }
 
 entrypoint! {
     unsafe fn borgvk_QueuePresentKHR(queue: VkQueue, info: *const std::ffi::c_void) -> VkResult {
         let r = wsi_QueuePresentKHR(queue, info);
-        present();
+        present(queue, info.cast());
         r
     }
 }
