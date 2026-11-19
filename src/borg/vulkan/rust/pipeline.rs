@@ -61,7 +61,7 @@ pub struct Pipeline {
     pub emul: [VkPipeline; 3],
     pub push_window: bool,   // a stage reads push constants from the heap window
     pub spills: bool,        // a stage spills to the region's scratch slot
-    pub push_stage: u8,      // bit per stage: loads push constants, no UBO
+    pub push_stage: u8,      // bit per stage: loads push constants at the load base
     pub set_base: [u8; 4],
     pub tex_binding: i32,    // binding of the texture the draw samples (fragment, else vertex shader)
     pub tex_pairs: [[u8; 2]; BORGVK_TEX_PAIRS], // texture and sampler slots of both stages
@@ -324,7 +324,8 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     pl.push_used = sc.stage_push[0] || sc.stage_push[1];
     pl.push_window = sc.stage_pwin[0] || sc.stage_pwin[1];
     pl.spills = sc.stage_spill[0] || sc.stage_spill[1];
-    let push_only = |s: usize| (sc.stage_push[s] && sc.stage_ubo[s] == 0 && !sc.stage_pwin[s]) as u8;
+    // borgc gives only a fragment shader that also loads memory the push window.
+    let push_only = |s: usize| (sc.stage_push[s] && !sc.stage_pwin[s]) as u8;
     pl.push_stage = push_only(0) | push_only(1) << 1;
     pl.color_count = formats.len() as u32;
     pl.mrt = mrt;
