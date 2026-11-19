@@ -46,6 +46,7 @@ mod render;
 mod sampler;
 mod scanout;
 mod shader_cache;
+mod stage_cache;
 mod state_upload;
 mod sim;
 mod sync;

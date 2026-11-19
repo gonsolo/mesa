@@ -303,7 +303,8 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     let blend = shader_blend(cb, formats.first().copied().unwrap_or(VK_FORMAT_UNDEFINED), mrt);
     sc.blend_lower = blend.as_ref().map_or(null(), |b| b);
     let stages = unsafe { slice(ci.pStages, ci.stageCount) };
-    compile_stages(dev, sc, stages, vfetch, frag_opt, points);
+    let key = crate::stage_cache::key(sc, stages, &[vfetch, frag_opt, points as u32, lines as u32], pull.as_ref());
+    crate::stage_cache::compiled(sc, key, |sc| compile_stages(dev, sc, stages, vfetch, frag_opt, points));
     sc.blend_lower = null();
     unsafe { borg_lower_set_front_always(false) };
     unsafe { borg_lower_set_vertex_pull(null()) };

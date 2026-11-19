@@ -56,6 +56,7 @@ pub struct Scratch {
     pub vp: Vp, // the viewport and scissor of the draw being queued
     pub bias: [f32; 2],
     pub state_valid: bool,
+    pub compiled: std::collections::HashMap<Vec<u8>, crate::stage_cache::Stages>,
 }
 
 impl Default for Scratch {
@@ -84,6 +85,7 @@ impl Default for Scratch {
             vp: Vp::default(),
             bias: [0.0; 2],
             state_valid: false,
+            compiled: Default::default(),
         }
     }
 }

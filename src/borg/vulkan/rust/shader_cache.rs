@@ -28,7 +28,7 @@ fn env_path(name: &str) -> Option<std::ffi::OsString> {
 }
 
 /// The SPIR-V of a stage: its module's, or one chained in place of a module.
-fn code(si: &VkPipelineShaderStageCreateInfo) -> Option<&[u8]> {
+pub fn code(si: &VkPipelineShaderStageCreateInfo) -> Option<&[u8]> {
     let (p, n) = if !si.module.is_null() {
         let m = unsafe { &*si.module.cast::<vk_shader_module>() };
         (m.data.as_ptr().cast::<u8>(), m.size as usize)
