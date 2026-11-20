@@ -283,6 +283,9 @@ fn buffer_image(img: &Image, buf: &Buffer, reg: &BufferRegion, to_buffer: bool) 
 }
 
 fn buffer_image_copies(img: &Image, buf: &Buffer, regions: &[BufferRegion], to_buffer: bool) {
+    if to_buffer && crate::scanout::presenting_in_place() {
+        return;
+    }
     let (Some(_), Some(bh)) = (img.host(), buf.host()) else { return };
     if blocks(img.vk.format).bd > 1 {
         return;

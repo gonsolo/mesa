@@ -59,15 +59,29 @@ fn in_place(queue: VkQueue, info: *const VkPresentInfoKHR) -> Option<[u32; 4]> {
         .then(|| [gpu + img.offset as u32, w.div_ceil(4) * 64, w | h << 16, if bgra { 1 } else { 2 } | 4])
 }
 
+thread_local! {
+    static IN_PLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Inside a present the scan-out shows in place: the window system's copy of the image is not
+/// needed, and reading the image would fetch it over the link.
+pub fn presenting_in_place() -> bool {
+    IN_PLACE.with(|c| c.get())
+}
+
+fn shown(queue: VkQueue, info: *const VkPresentInfoKHR) -> Option<[u32; 4]> {
+    // Under KMS the kernel owns the scan-out.
+    (crate::hw::enabled() && !KMS.load(Ordering::Relaxed)).then(|| in_place(queue, info)).flatten()
+}
+
 /// After a present: the image itself when the scan-out can show it in place, else the last copied
 /// frame, centred and cut to 640x480, to the next front buffer.
-pub fn present(queue: VkQueue, info: *const VkPresentInfoKHR) {
+pub fn present(in_place: Option<[u32; 4]>) {
     let last = LAST.lock().unwrap_or_else(|p| p.into_inner()).take();
-    // Under KMS the kernel owns the scan-out.
     if !crate::hw::enabled() || KMS.load(Ordering::Relaxed) {
         return;
     }
-    if let Some(desc) = in_place(queue, info) {
+    if let Some(desc) = in_place {
         crate::dev::with(|d| d.mem_write(BORG_SCANOUT_SPI, &desc.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()));
         return;
     }
@@ -97,8 +111,11 @@ unsafe extern "C" {
 
 entrypoint! {
     unsafe fn borgvk_QueuePresentKHR(queue: VkQueue, info: *const std::ffi::c_void) -> VkResult {
+        let desc = shown(queue, info.cast());
+        IN_PLACE.with(|c| c.set(desc.is_some()));
         let r = wsi_QueuePresentKHR(queue, info);
-        present(queue, info.cast());
+        IN_PLACE.with(|c| c.set(false));
+        present(desc);
         r
     }
 }
