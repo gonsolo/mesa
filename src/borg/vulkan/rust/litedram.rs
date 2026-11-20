@@ -3,7 +3,7 @@
 
 //! LiteDRAM's DDR3 calibration from the host, for a Nexys Video whose memory controller is
 //! LiteDRAM (Borg's fpga/nexysvideo/LiteDram.yml): LiteX's `sdram_init` for the A7DDRPHY (read
-//! leveling, no write leveling) through the board's register window at offsets 0x200-0x3FF. The
+//! leveling, no write leveling) through the board's register window at offsets 0x400-0x5FF. The
 //! register indices follow that core's csr.csv.
 
 use crate::dev::Dev;
@@ -18,13 +18,13 @@ const RDPHASE: u32 = 3;
 const WRPHASE: u32 = 3;
 
 const fn ctrl(i: u32) -> u32 {
-    0x200 + 4 * i
+    0x400 + 4 * i
 }
 const fn phy(i: u32) -> u32 {
-    0x200 + 4 * (32 + i)
+    0x400 + 4 * (32 + i)
 }
 const fn dfii(i: u32) -> u32 {
-    0x200 + 4 * (64 + i)
+    0x400 + 4 * (64 + i)
 }
 
 const INIT_DONE: u32 = ctrl(0);
