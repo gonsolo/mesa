@@ -28,6 +28,7 @@ mod fmt;
 mod format;
 mod heap;
 mod list;
+mod litedram;
 mod hw;
 #[cfg(borgc)]
 mod nir_info;

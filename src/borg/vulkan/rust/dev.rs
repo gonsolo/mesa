@@ -48,6 +48,7 @@ fn open() -> Option<Dev> {
         let (to, from) = (c.stdin.take()?, c.stdout.take()?);
         let mut d = Dev::new(Link::Pipe(Box::new(to), Box::new(from), c));
         d.dirty(); // what an earlier session left
+        crate::litedram::calibrate(&mut d);
         return Some(d);
     } else {
         let node = std::env::var("BORG_HW_NODE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
