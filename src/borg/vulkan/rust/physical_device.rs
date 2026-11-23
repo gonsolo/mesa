@@ -399,7 +399,7 @@ fn properties() -> vk_properties {
     p.driverID = VK_DRIVER_ID_MESA_DOZEN; // until Borg has an ID
     p.conformanceVersion = VkConformanceVersion { major: 1, minor: 3, subminor: 0, patch: 0 };
 
-    set_name(&mut p.deviceName, "Borg (ULX3S)");
+    set_name(&mut p.deviceName, "Borg");
     set_name(&mut p.driverName, "borgvk");
     set_name(&mut p.driverInfo, "Mesa borgvk");
     p
