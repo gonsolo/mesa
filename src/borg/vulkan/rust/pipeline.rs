@@ -303,7 +303,7 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     let blend = shader_blend(cb, formats.first().copied().unwrap_or(VK_FORMAT_UNDEFINED), mrt);
     sc.blend_lower = blend.as_ref().map_or(null(), |b| b);
     let stages = unsafe { slice(ci.pStages, ci.stageCount) };
-    let key = crate::stage_cache::key(sc, stages, &[vfetch, frag_opt, points as u32, lines as u32], pull.as_ref());
+    let key = crate::stage_cache::key(sc, stages, &[vfetch, frag_opt, points as u32, lines as u32, sc.frag_sample as u32], pull.as_ref());
     crate::stage_cache::compiled(sc, key, |sc| compile_stages(dev, sc, stages, vfetch, frag_opt, points));
     sc.blend_lower = null();
     unsafe { borg_lower_set_front_always(false) };
@@ -473,9 +473,21 @@ entrypoint! {
             // The shared R8 targets have one value per pixel: multisampled ones draw in turn.
             let ms = unsafe { ci.pMultisampleState.as_ref() }.is_some_and(|m| m.rasterizationSamples > 1);
             let emulate = (2..=4).contains(&formats.len()) && (ms || !mrt_formats(formats));
-            let r = match ri {
-                Some(ri) if emulate => build_emulated(device, &mut sc, alloc, ci, ri),
-                _ => build_graphics(device, &mut sc, alloc, ci),
+            let build = |sc: &mut Scratch| match ri {
+                Some(ri) if emulate => build_emulated(device, sc, alloc, ci, ri),
+                _ => build_graphics(device, sc, alloc, ci),
+            };
+            sc.frag_reads_sample_id = false;
+            // At one sample gl_SampleID is 0.
+            let r = match build(&mut sc) {
+                Ok(p) if !ms && sc.frag_reads_sample_id => {
+                    destroy(device, unsafe { p.get() }.unwrap(), alloc);
+                    sc.frag_sample = 0;
+                    let r = build(&mut sc);
+                    sc.frag_sample = -1;
+                    r
+                }
+                r => r,
             };
             match r {
                 Ok(p) => out[i] = p,
