@@ -478,6 +478,10 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
    nir_def *desc = nir_load_vulkan_descriptor(b, nir_address_format_num_components(fmt),
                                               nir_address_format_bit_size(fmt), idx,
                                               .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+   /* Robust: an index past the end stays at the last texel; the count is in the window's last 16
+    * bytes (past the decoded texels the window holds whatever was there before). */
+   nir_def *n = nir_load_ssbo(b, 1, 32, nir_channel(b, desc, 0), nir_imm_int(b, BORG_CS_SLOT_BYTES - 16), .align_mul = 16);
+   coord = nir_umin(b, coord, nir_iadd_imm(b, nir_umax(b, n, nir_imm_int(b, 1)), -1));
    nir_def *off = nir_imul_imm(b, coord, 16);
    if (instr->type == nir_instr_type_intrinsic && borg_image_atomic(nir_instr_as_intrinsic(instr))) {
       nir_intrinsic_instr *at = nir_instr_as_intrinsic(instr);
