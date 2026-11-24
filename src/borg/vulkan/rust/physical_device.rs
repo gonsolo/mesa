@@ -427,6 +427,7 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
         }
         extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_16bit_storage = true;
         extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_storage_buffer_storage_class = true;
+        extensions.__bindgen_anon_1.__bindgen_anon_1.EXT_host_query_reset = true;
     }
     features.robustBufferAccess = true;
     features.textureCompressionBC = true; // the spec wants one compressed family
@@ -436,6 +437,7 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     features.storageBuffer16BitAccess = true;
     features.uniformAndStorageBuffer16BitAccess = true;
     features.storagePushConstant16 = true;
+    features.hostQueryReset = true;
     let r = unsafe { vk_physical_device_init(&mut d.vk, &mut instance.vk, &extensions, &features, &properties(), &dispatch) };
     if r != VK_SUCCESS {
         return r;
