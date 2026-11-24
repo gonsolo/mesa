@@ -371,6 +371,9 @@ pub fn decode_compressed_image(s: &Image) -> Option<Decoded> {
             let (doff, _) = shape(&o).level_offset(l, layer, rgba);
             let sslice = wb as u64 * h.div_ceil(sb.bh) as u64 * sb.bs as u64;
             let dslice = w as u64 * h as u64 * 16;
+            // Mesa's unpackers write whole blocks: decode block-aligned, keep the w x h part.
+            let (aw, ah) = (w.next_multiple_of(sb.bw) as usize, h.next_multiple_of(sb.bh) as usize);
+            let mut tmp = vec![0u8; aw * ah * 16];
             for z in 0..d as u64 {
                 let Some(src) = sh.ptr((soff + z * sslice) as usize, sslice as usize) else { continue };
                 let at = (doff + z * dslice) as usize;
@@ -378,14 +381,17 @@ pub fn decode_compressed_image(s: &Image) -> Option<Decoded> {
                 unsafe {
                     util_format_unpack_rgba_rect(
                         pf,
-                        dst.as_mut_ptr().cast(),
-                        w * 16,
+                        tmp.as_mut_ptr().cast(),
+                        aw as u32 * 16,
                         src.cast(),
                         wb * sb.bs,
-                        w,
-                        h,
+                        aw as u32,
+                        ah as u32,
                     )
                 };
+                for (d, t) in dst.chunks_exact_mut(w as usize * 16).zip(tmp.chunks_exact(aw * 16)) {
+                    d.copy_from_slice(&t[..w as usize * 16]);
+                }
             }
         }
     }
