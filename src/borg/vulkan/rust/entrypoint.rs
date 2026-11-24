@@ -59,6 +59,10 @@ macro_rules! handle {
             }
 
             fn from_object(o: *mut $obj) -> Self {
+                // As Mesa's _to_handle: vk_log asserts that a logged object's instance reached the app.
+                if let Some(b) = unsafe { o.cast::<$crate::ffi::vk_object_base>().as_mut() } {
+                    b.client_visible = true;
+                }
                 o.cast()
             }
         }
