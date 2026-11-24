@@ -32,7 +32,7 @@ macro_rules! r {
 }
 
 const TEXEL_BASE: u32 = 0x7A0_0000;
-const TEXEL_BYTES: u32 = 0x60_0000;
+pub const TEXEL_BYTES: u32 = 0x60_0000;
 const SHIFT_MIN: u32 = 8;
 const SHIFT_MAX: u32 = 10;
 const LIST_MAX_REGS: usize = 40;
