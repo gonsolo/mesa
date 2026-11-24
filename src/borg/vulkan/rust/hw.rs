@@ -76,7 +76,8 @@ pub fn run_job(d: &mut crate::dev::Dev, job: &[u8]) -> Option<Vec<u8>> {
     let [nprog, gx, gy, gz, lx, ly, lz, nregs, nbufs, bx, by, bz] = h;
     let prog: Vec<u32> = (0..nprog).map(|_| j.take()).collect();
     d.reg(CONTROL, 2);
-    if nprog > IMEM_WORDS {
+    // A program filling the window has no room there for its closing zero: it runs from DRAM.
+    if nprog >= IMEM_WORDS {
         let mut code = prog.clone();
         code.push(0);
         d.mem_write(CODE_ADDR, unsafe { std::slice::from_raw_parts(code.as_ptr().cast(), code.len() * 4) });
