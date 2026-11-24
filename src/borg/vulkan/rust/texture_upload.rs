@@ -121,10 +121,9 @@ fn build(view: &vk_image_view, img: &Image) -> Option<Texture> {
             ltotal = ltotal.wrapping_add(size);
         }
         let total = ltotal.wrapping_mul(layers);
-        // The board's texture region is 512 KB, the direct simulator's 6 MB. A larger texture sends
-        // its descriptor alone, so size queries still answer; its texels read whatever is there.
-        let direct = std::env::var_os("BORGVK_SIM_DIRECT").is_some_and(|d| !d.is_empty());
-        let fits = total <= if direct { 0x60_0000 } else { 0x7_0000 };
+        // A texture larger than the list's texel region sends its descriptor alone, so size queries
+        // still answer; its texels read whatever is there.
+        let fits = total <= crate::list::TEXEL_BYTES;
         if !fits {
             crate::util::log(crate::util::MESA_LOG_WARN, format!("borgvk: a {total}-byte texture exceeds the texture region"));
         }
