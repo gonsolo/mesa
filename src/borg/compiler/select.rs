@@ -1464,6 +1464,10 @@ impl ShaderState {
         if let Some(e) = loops.err.take() {
             self.refuse(e);
         }
+        // A vertex shader computes its zero once (consts.rs): here, before a branch could mask lanes off.
+        if self.stage == Stage::Vertex {
+            self.konst(0);
+        }
         // Per loop: lanes still looping, lanes going round this time, and whether any lane is.
         let lv: Vec<(u32, u32, u32)> = (0..loops.count).map(|_| (self.sel.fresh(), self.sel.fresh(), self.sel.fresh())).collect();
 
