@@ -47,6 +47,8 @@ pub struct Scratch {
     pub vert_tex_binding: i32,
     pub tex_pairs: Vec<[u8; 2]>, // the pipeline's descriptor indices: texture and sampler flat slots
     pub frag_select: u32, // 1 + the colour output the fragment shader keeps; 0 keeps all
+    pub frag_sample: i32, // a per-sample pipeline's gl_SampleID; -1 otherwise
+    pub frag_reads_sample_id: bool,
     pub frag_reads_pntc: bool,
     pub frag_flat: u64,
     pub hoist: borg_hoist, // the fragment shader's per-draw work, for its vertex shader
@@ -76,6 +78,8 @@ impl Default for Scratch {
             vert_tex_binding: -1,
             tex_pairs: Default::default(),
             frag_select: 0,
+            frag_sample: -1,
+            frag_reads_sample_id: false,
             frag_reads_pntc: false,
             frag_flat: 0,
             hoist: borg_hoist { pre: std::ptr::null_mut(), first_slot: 0, slots: 0 },

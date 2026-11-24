@@ -1360,6 +1360,31 @@ borg_lower_set_no_flatten(bool on)
    no_flatten = on;
 }
 
+static bool
+borg_sample_id(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_sample_id)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_imm_int(b, *(const int *)data));
+   return true;
+}
+
+bool
+borg_lower_sample_id(struct nir_shader *nir, int sample)
+{
+   NIR_PASS(_, nir, nir_lower_system_values);
+   if (sample >= 0)
+      return nir_shader_intrinsics_pass(nir, borg_sample_id, nir_metadata_control_flow, &sample);
+   nir_foreach_function_impl(impl, nir)
+      nir_foreach_block(block, impl)
+         nir_foreach_instr(instr, block)
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_sample_id)
+               return true;
+   return false;
+}
+
 /* 16-bit storage: memory is accessed in words; a 16-bit store is an AND and an OR on its word. */
 static nir_mem_access_size_align
 borg_mem_size_align(nir_intrinsic_op intrin, uint8_t bytes, uint8_t bit_size, uint32_t align_mul,

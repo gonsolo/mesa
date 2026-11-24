@@ -22,6 +22,7 @@ pub struct Stages {
     spill: [bool; 2],
     sample_mask: bool,
     reads_pntc: bool,
+    reads_sample_id: bool,
 }
 
 fn put(k: &mut Vec<u8>, words: &[u32]) {
@@ -103,6 +104,7 @@ fn save(sc: &Scratch) -> Stages {
         pwin: sc.stage_pwin,
         spill: sc.stage_spill,
         sample_mask: sc.frag_sample_mask,
+        reads_sample_id: sc.frag_reads_sample_id,
         reads_pntc: sc.frag_reads_pntc,
     }
 }
@@ -124,6 +126,7 @@ fn restore(sc: &mut Scratch, s: &Stages) {
     sc.stage_pwin = s.pwin;
     sc.stage_spill = s.spill;
     sc.frag_sample_mask = s.sample_mask;
+    sc.frag_reads_sample_id = s.reads_sample_id;
     sc.frag_reads_pntc = s.reads_pntc;
 }
 

@@ -60,6 +60,7 @@ fn from_cache(sc: &mut Scratch, si: &VkPipelineShaderStageCreateInfo, vfetch: u3
     let fs = slot == FRAG;
     if fs {
         sc.frag_reads_pntc = pntc;
+        sc.frag_reads_sample_id = false;
         sc.frag_tex_binding = -1;
     } else {
         sc.vert_tex_binding = -1;
@@ -81,7 +82,8 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
     let (vs, fs) = (si.stage == VK_SHADER_STAGE_VERTEX_BIT, si.stage == VK_SHADER_STAGE_FRAGMENT_BIT);
     let slot = if vs { Some(VERT) } else if fs { Some(FRAG) } else { None };
     let blend = if fs { sc.blend_lower } else { null() };
-    if let Some(slot) = slot.filter(|_| blend.is_null()) {
+    // A per-sample variant is not the SPIR-V's blob: no cache.
+    if let Some(slot) = slot.filter(|_| blend.is_null() && !(fs && sc.frag_sample >= 0)) {
         if from_cache(sc, si, vfetch, slot) {
             return;
         }
@@ -97,6 +99,10 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
         link_flat(nir, sc.frag_flat);
     } else if fs {
         sc.frag_flat = flat_inputs(unsafe { &*nir });
+        sc.frag_reads_sample_id = unsafe { borg_lower_sample_id(nir, -1) };
+        if sc.frag_sample >= 0 {
+            unsafe { borg_lower_sample_id(nir, sc.frag_sample) };
+        }
     }
     let lines = BORGC_VS_FETCH | BORGC_VS_POINT_QUADS | BORGC_VS_LINES_BIT;
     if vs && vfetch & lines == BORGC_VS_FETCH | BORGC_VS_LINES_BIT {
@@ -199,7 +205,7 @@ fn compile_blob(
         }
         b.ncdata = cdata.len() as u32;
         b.cdata[..cdata.len()].copy_from_slice(&cdata);
-        if blend.is_null() && n == 0 && cdata.is_empty() {
+        if blend.is_null() && n == 0 && cdata.is_empty() && !(fs && sc.frag_sample >= 0) {
             if !sc.pull {
                 shader_cache::record(si, vfetch, b, sc.frag_reads_pntc);
             }
