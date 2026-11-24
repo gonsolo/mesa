@@ -118,6 +118,15 @@ entrypoint! {
 }
 
 entrypoint! {
+    fn borgvk_ResetQueryPool(_device: VkDevice, pool: &QueryPool, first: u32, count: u32) {
+        for s in pool.range(first, count) {
+            s.result.store(0, Relaxed);
+            s.avail.store(false, Relaxed);
+        }
+    }
+}
+
+entrypoint! {
     fn borgvk_CmdResetQueryPool(c: &mut CommandBuffer, pool: &QueryPool, first: u32, count: u32) {
         crate::draw::flush_draws(c);
         for s in pool.range(first, count) {
