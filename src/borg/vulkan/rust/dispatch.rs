@@ -236,7 +236,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Option<Vec<CsBuf>> {
             let gpu = b_.memory().map(|m| m.gpu).filter(|&g| g != 0)?;
             let (addr, size) = (gpu + (b_.offset + off) as u32, whole.min(u32::MAX as u64 - 3) as u32);
             sizes[window as usize] = size;
-            table[2 * window as usize..][..2].copy_from_slice(&[addr, (size.max(4) - 4) & !3]);
+            table[2 * window as usize..][..2].copy_from_slice(&[addr, (size.max(1) - 1) & !3]);
             bufs.push(CsBuf { host, decoded: None, wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0), in_place: true });
         }
     }

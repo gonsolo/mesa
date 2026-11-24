@@ -361,7 +361,8 @@ fn set_entry(table: &mut Vec<[u32; 2]>, slot: u32, e: [u32; 2]) {
 }
 
 fn entry(addr: u32, len: u64) -> [u32; 2] {
-    [addr, (len.min(u32::MAX as u64 - 3).max(4) as u32 - 4) & !3]
+    // The last word holding a byte of the range: 16-bit accesses use whole words.
+    [addr, (len.min(u32::MAX as u64).max(1) as u32 - 1) & !3]
 }
 
 impl Ctx<'_> {
