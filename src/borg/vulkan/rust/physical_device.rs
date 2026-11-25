@@ -397,7 +397,7 @@ fn properties() -> vk_properties {
     p.maxTimelineSemaphoreValueDifference = i64::MAX as u64;
     p.maxInlineUniformTotalSize = 256;
     p.driverID = VK_DRIVER_ID_MESA_DOZEN; // until Borg has an ID
-    p.conformanceVersion = VkConformanceVersion { major: 1, minor: 3, subminor: 0, patch: 0 };
+    p.conformanceVersion = VkConformanceVersion { major: 0, minor: 0, subminor: 0, patch: 0 }; // no conformant run yet
 
     set_name(&mut p.deviceName, "Borg");
     set_name(&mut p.driverName, "borgvk");
