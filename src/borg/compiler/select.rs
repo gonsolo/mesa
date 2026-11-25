@@ -4,6 +4,9 @@ use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
 use crate::HashMap;
+
+/// The first binding of a pulled vertex buffer (borg_nir_passes.h BORG_VB_SLOT0).
+const VB_SLOT0: u32 = 128;
 use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Loc, NO_DST, PUSH_WINDOW_WORDS};
 use compiler::bindings::*;
 use compiler::nir::AsDef;
@@ -1093,10 +1096,15 @@ impl ShaderState {
         // The descriptor's own offset component (a dynamic buffer's) is in the table's base: 0.
         let off_is_descriptor = self.vert.descriptor_defs.contains(&resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0).0);
         let o = if off_is_descriptor { Val::K(0) } else { self.val(intr.get_src(osrc), 0) };
+        let mut oob = None;
         let a0 = match o {
             Val::K(0) => Val::R(base, 0),
             o => {
                 let lim = if n > 1 { self.add(Val::R(lim, 0), Val::K((4 * (n - 1)).wrapping_neg())) } else { Val::R(lim, 0) };
+                // A vertex attribute past its buffer reads zeros: the clamped last bytes may straddle two.
+                if !store && binding >= VB_SLOT0 {
+                    oob = Some(self.bin(Op::Isltu, lim, o));
+                }
                 let w = self.bin(Op::Minu, o, lim);
                 self.add(Val::R(base, 0), w)
             }
@@ -1108,7 +1116,15 @@ impl ShaderState {
             }
             return;
         }
-        let comps = (0..n).map(|c| match self.load_at(a0, c) { Val::R(r, k) => (r, k), Val::K(_) => unreachable!() }).collect();
+        let comps = (0..n)
+            .map(|c| {
+                let v = match self.load_at(a0, c) { Val::R(r, k) => (r, k), Val::K(_) => unreachable!() };
+                match oob {
+                    Some(z) => { let z = self.vreg(z); (self.sel.opc(Op::CzeroNez, &[v, z]), 0) }
+                    None => v,
+                }
+            })
+            .collect();
         self.sel.vec_map.insert(intr.def.index, comps);
     }
 
