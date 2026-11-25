@@ -470,11 +470,15 @@ impl Builder {
     pub fn draw(&mut self, g: &mut Prog) {
         let (n, dp, bias) = (self.vertex_count, self.dp, self.bias);
         let room = self.vert.as_ref().and_then(|v| record_shift(v.varyings)).map_or(0, |s| self.setup_room_tris(s) / 3 * 3);
-        if dp.topology != 0 || dp.index_type != 0 || dp.instance_count > 1 || room == 0 || n <= room {
+        // A triangle list's indices split like its vertices: the triangle index is 16 bits.
+        let isz = [0, 2, 4][dp.index_type.min(2) as usize];
+        if dp.topology != 0 || isz != 0 && dp.restart != 0 || dp.instance_count > 1 || room == 0 || n <= room {
             return self.draw_part(g);
         }
         for first in (0..n).step_by(room as usize) {
-            (self.vertex_count, self.dp.first_vertex, self.bias) = (room.min(n - first), dp.first_vertex + first, bias);
+            self.vertex_count = room.min(n - first);
+            (self.dp.first_vertex, self.dp.index_base) = if isz != 0 { (dp.first_vertex, dp.index_base + first * isz) } else { (dp.first_vertex + first, dp.index_base) };
+            self.bias = bias;
             self.draw_part(g);
         }
         (self.vertex_count, self.dp) = (n, dp);
