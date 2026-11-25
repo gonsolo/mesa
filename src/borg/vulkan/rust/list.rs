@@ -143,7 +143,7 @@ struct DrawExt {
 fn draw_ext(b: &[u8]) -> Option<DrawExt> {
     let h = b.get(..6)?;
     let n = h[0] as usize | (h[5] as usize >> 1) << 8;
-    if n > DRAW_VERT_SHADER_MAX_WORDS as usize || h[1..5].iter().any(|&k| k > 32) || h[5] & 1 == 0 {
+    if n > DRAW_FRAG_SHADER_MAX_WORDS as usize || h[1..5].iter().any(|&k| k > 32) || h[5] & 1 == 0 {
         return None;
     }
     let p = 6 + 4 * n + h[1..5].iter().map(|&k| k as usize).sum::<usize>() + 4 * h[4] as usize;
@@ -326,7 +326,8 @@ impl Builder {
 
     fn stage_shader(&mut self, g: &mut Prog, stage: usize, blob: &[u8]) {
         let n = blob_instrs(blob);
-        if n > DRAW_VERT_SHADER_MAX_WORDS {
+        let max = if stage == 0 { DRAW_VERT_SHADER_MAX_WORDS } else { DRAW_FRAG_SHADER_MAX_WORDS };
+        if n > max {
             return;
         }
         let (u0, words) = if stage == 0 { (DRAW_VS_CONST_U0, DRAW_VS_CONST_MAX_WORDS) } else { (DRAW_FS_CONST_U0, DRAW_FS_CONST_WORDS) };
@@ -343,7 +344,7 @@ impl Builder {
         for i in 0..n {
             g.mem(addr + i * 4, le32(&blob[6 + 4 * i as usize..]));
         }
-        if n < DRAW_VERT_SHADER_MAX_WORDS {
+        if n < max {
             g.mem(addr + n * 4, 0);
         }
         if stage == 0 {
