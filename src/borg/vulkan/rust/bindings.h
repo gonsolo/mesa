@@ -22,6 +22,7 @@
 #include "vk_format.h"
 #include "vk_pipeline_layout.h"
 #include "vk_sync.h"
+#include "vk_sync_dummy.h"
 #include "vk_cmd_queue.h"
 #include "wsi_common_entrypoints.h"
 #include "vulkan/vk_icd.h"

@@ -22,7 +22,7 @@ use std::os::fd::{AsRawFd, IntoRawFd};
 pub struct PhysicalDevice {
     pub vk: vk_physical_device,
     pub memory: VkPhysicalDeviceMemoryProperties,
-    pub sync_types: [*const vk_sync_type; 2],
+    pub sync_types: [*const vk_sync_type; 3],
     pub drm_fd: i32,
     /// The DRM primary node, for VK_KHR_display; -1 without one.
     pub display_fd: i32,
@@ -451,7 +451,8 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     m.memoryTypeCount = 1;
     m.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     m.memoryTypes[0].heapIndex = 0;
-    d.sync_types = [&SYNC_TYPE, std::ptr::null()];
+    // WSI gives acquired images' fences and semaphores dummy payloads, which the runtime then waits on.
+    d.sync_types = [&SYNC_TYPE, unsafe { &vk_sync_dummy_type }, std::ptr::null()];
     d.vk.supported_sync_types = d.sync_types.as_ptr();
     let r = wsi_init(&mut d);
     if r != VK_SUCCESS {
