@@ -531,6 +531,14 @@ impl Ctx<'_> {
     }
 
     fn reserve(&mut self) {
+        // A draw reading a target it renders to (an input attachment) reads memory: the batch's
+        // earlier draws must have stored there.
+        let r = self.c.rendering;
+        let target = |i: *mut Image| !i.is_null() && (r.color.contains(&i) || i == r.depth || i == r.stencil);
+        let reads = (0..4).filter_map(|k| self.c.gfx_set(k)).any(|s| s.images.iter().any(|&i| target(i)));
+        if reads && self.c.batch_draws != 0 {
+            flush_draws(self.c);
+        }
         let (p, pl, x) = (self.p, self.pl, self.x as u64);
         let mut need = if p.indexed { p.count as u64 * p.index_size as u64 + 32 } else { 0 };
         for b in 0..VB {
