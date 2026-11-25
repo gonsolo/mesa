@@ -164,6 +164,8 @@ struct Stage {
     blob: Vec<u8>,
     code: u32,
     consts: u32,
+    base: u32,
+    pc: u32,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -199,6 +201,10 @@ struct List {
     /// The pixels its draws can change: the union of their scissors, unless one has none.
     area: Option<[u32; 4]>,
     full: bool,
+    /// Each shader once: stage, blob, code and constants.
+    codes: Vec<(usize, Vec<u8>, u32, u32)>,
+    /// The fragment shaders' code base: one I-cache image while their FRAG_PC fits.
+    frag_base: u32,
 }
 
 pub struct Builder {
@@ -415,8 +421,21 @@ impl Builder {
         if self.sh[stage].code != 0 {
             return;
         }
-        let window = if stage == 0 { &self.vert } else { &self.frag }.as_ref().unwrap().window.clone();
         let n = blob_instrs(&self.sh[stage].blob);
+        let (a, c) = match self.list.codes.iter().find(|e| e.0 == stage && e.1 == self.sh[stage].blob) {
+            Some(e) => (e.2, e.3),
+            None => self.list_code(g, stage, n),
+        };
+        let fits = |b: u32| a > b && (a - b) / 4 + n + 2 <= 1 << 14;
+        if stage == 1 && (self.list.frag_base == 0 || !fits(self.list.frag_base)) {
+            self.list.frag_base = a - 4;
+        }
+        let base = self.list.frag_base;
+        self.sh[stage] = Stage { code: a, consts: c, base, pc: (a - base) / 4, blob: std::mem::take(&mut self.sh[stage].blob) };
+    }
+
+    fn list_code(&mut self, g: &mut Prog, stage: usize, n: u32) -> (u32, u32) {
+        let window = if stage == 0 { &self.vert } else { &self.frag }.as_ref().unwrap().window.clone();
         let (words, u0) = if stage == 0 { (DRAW_VS_CONST_MAX_WORDS, DRAW_VS_CONST_U0) } else { (DRAW_FS_CONST_WORDS, DRAW_FS_CONST_U0) };
         let a = self.alloc((n + 1) * 4);
         for i in 0..n {
@@ -430,7 +449,8 @@ impl Builder {
         for (r, v) in window {
             g.mem(c + (r - u0) * 4, v);
         }
-        (self.sh[stage].code, self.sh[stage].consts) = (a, c);
+        self.list.codes.push((stage, self.sh[stage].blob.clone(), a, c));
+        (a, c)
     }
 
     fn setup_room_tris(&self, shift: u32) -> u32 {
@@ -503,7 +523,8 @@ impl Builder {
         let mut st: Vec<[u32; 2]> = Vec::with_capacity(LIST_MAX_REGS);
         st.push([r!(seq_vert_addr), self.sh[0].code]);
         st.push([r!(seq_vert_len), blen(&self.sh[0].blob)]);
-        st.push([r!(seq_frag_addr), self.sh[1].code]);
+        st.push([r!(seq_frag_addr), self.sh[1].base + 4]);
+        st.push([r!(frag_pc), self.sh[1].pc]);
         st.push([r!(seq_frag_len), blen(&self.sh[1].blob).min(63)]);
         st.push([r!(draw_vs_const), self.sh[0].consts]);
         st.push([r!(draw_fs_const), self.sh[1].consts]);
