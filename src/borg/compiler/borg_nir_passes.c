@@ -1585,6 +1585,7 @@ borg_pre_plain(nir_function_impl *pre)
 {
    if (!exec_list_is_singular(&pre->body))
       return false;
+   bool push = false;
    nir_foreach_block(block, pre) {
       nir_foreach_instr(instr, block) {
          if (instr->type == nir_instr_type_intrinsic) {
@@ -1596,13 +1597,14 @@ borg_pre_plain(nir_function_impl *pre)
             } else if (intr->intrinsic != nir_intrinsic_load_push_constant) {
                return false;
             }
+            push |= intr->intrinsic == nir_intrinsic_load_push_constant;
          } else if (instr->type != nir_instr_type_alu && instr->type != nir_instr_type_load_const &&
                     instr->type != nir_instr_type_undef) {
             return false;
          }
       }
    }
-   return true;
+   return push;
 }
 
 /* Declared only: borgc takes a vertex shader's flat outputs from its variables. */
