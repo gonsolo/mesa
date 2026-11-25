@@ -1268,6 +1268,19 @@ fn target_bytes(img: *mut Image) -> Option<(*mut Image, Vec<u8>)> {
 fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     let first = c.gfx_pipeline;
     let (fp, c) = c.split_gfx_pipeline();
+    // One sample per pass: each touches only its own sample, so no pass sees another's writes.
+    if let Some(sp) = fp.filter(|f| f.sample_n != 0) {
+        let (n, pls) = (sp.sample_n as usize, sp.sample_pl);
+        let mut ok = true;
+        for k in 0..n {
+            if k != 0 {
+                c.gfx_pipeline = pls[k - 1].ptr();
+            }
+            ok &= draw_one(device, c, p);
+        }
+        c.gfx_pipeline = first;
+        return ok;
+    }
     let Some(fp) = fp.filter(|f| f.emul_n != 0) else { return draw_one(device, c, p) };
     let (depth, stencil) = (c.rendering.depth, c.rendering.stencil);
     let has_ds = !depth.is_null() || !stencil.is_null();
