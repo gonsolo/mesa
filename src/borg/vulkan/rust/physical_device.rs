@@ -396,7 +396,7 @@ fn properties() -> vk_properties {
     p.framebufferIntegerColorSampleCounts = VK_SAMPLE_COUNT_1_BIT;
     p.maxTimelineSemaphoreValueDifference = i64::MAX as u64;
     p.maxInlineUniformTotalSize = 256;
-    p.driverID = VK_DRIVER_ID_MESA_DOZEN; // until Borg has an ID
+    p.driverID = 0x424F_5247; // "BORG", unregistered until Khronos assigns VK_DRIVER_ID_MESA_BORG
     p.conformanceVersion = VkConformanceVersion { major: 0, minor: 0, subminor: 0, patch: 0 }; // no conformant run yet
 
     set_name(&mut p.deviceName, "Borg");
