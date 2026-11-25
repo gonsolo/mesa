@@ -180,7 +180,8 @@ static nir_def *borg_pull_channel(nir_builder *b, nir_def *const *words,
 static bool
 borg_image_direct(nir_builder *b, nir_variable *var)
 {
-   return (b->shader->info.stage == MESA_SHADER_COMPUTE || b->shader->info.stage == MESA_SHADER_FRAGMENT) &&
+   return (b->shader->info.stage == MESA_SHADER_COMPUTE || b->shader->info.stage == MESA_SHADER_FRAGMENT ||
+           b->shader->info.stage == MESA_SHADER_VERTEX) &&
           borg_lower_image_in_place(var->data.image.format);
 }
 
