@@ -196,6 +196,9 @@ struct List {
     load: u32,
     shift: u32,
     tris: u32,
+    /// The pixels its draws can change: the union of their scissors, unless one has none.
+    area: Option<[u32; 4]>,
+    full: bool,
 }
 
 pub struct Builder {
@@ -533,6 +536,14 @@ impl Builder {
                 st.push([r!(scissor_y), 0]);
             }
         }
+        match self.vp.filter(|v| v[7] >> 26 & 1 != 0) {
+            Some(v) => {
+                let r = [v[6] & 0x1FFF, v[7] & 0x1FFF, v[6] >> 13 & 0x1FFF, v[7] >> 13 & 0x1FFF];
+                let a = self.list.area.unwrap_or(r);
+                self.list.area = Some([a[0].min(r[0]), a[1].min(r[1]), a[2].max(r[2]), a[3].max(r[3])]);
+            }
+            None => self.list.full = true,
+        }
         let dp = self.dp;
         st.push([r!(draw_cfg), 1 | dp.topology << 1 | dp.index_type << 3 | dp.restart << 5 | shift << 6 | dp.points << 10]);
         if self.list.state_addr == 0 || self.list.state != st || self.list.table != dp.table {
@@ -587,7 +598,13 @@ impl Builder {
                 g.reg(reg, a);
             }
         }
-        g.op(&[TILES, fb_tiles, self.fb_h >> 2, tw, th]);
+        // With KEEP (bit 3) a tile no draw can change is left alone: only the scissors' tiles render.
+        let rows = self.fb_h >> 2;
+        let b = match self.list.area.filter(|_| load & 8 != 0 && !self.list.full) {
+            Some(a) => [a[0] >> 2, a[1] >> 2, ((a[2] + 3) >> 2).min(fb_tiles), ((a[3] + 3) >> 2).min(rows)],
+            None => [0, 0, fb_tiles, rows],
+        };
+        g.op(&[TILES, fb_tiles, rows, tw, th, b[0], b[1], b[2], b[3]]);
         g.reg(r!(render_list), 0);
     }
 
@@ -880,16 +897,18 @@ impl Prog {
                     i += 3;
                 }
                 TILES => {
-                    let (fb_tiles, fb_rows, tw, th) = (w(i + 1), w(i + 2), w(i + 3), w(i + 4));
-                    let rows = fb_rows;
+                    let (tw, th) = (w(i + 3).max(1), w(i + 4).max(1));
+                    // The tiles to render: [x0, y0) to [x1, y1), the windows that cover them.
+                    let (x0, y0, x1, rows) = (w(i + 5), w(i + 6), w(i + 7), w(i + 8));
                     // More than one window: the first writes the box cache, the others skip what misses them.
-                    let many = rows.div_ceil(th.max(1)) * fb_tiles.div_ceil(tw.max(1)) > 1;
+                    let many = rows.saturating_sub(y0).div_ceil(th) * x1.saturating_sub(x0).div_ceil(tw) > 1;
                     let mut box_mode = if many { 1 } else { 0 };
-                    for wy in (0..rows).step_by(th.max(1) as usize) {
-                        for wx in (0..fb_tiles).step_by(tw.max(1) as usize) {
+                    for wy in (y0..rows).step_by(th as usize) {
+                        for wx in (x0..x1).step_by(tw as usize) {
                             let mode = box_mode;
                             box_mode = if many { 2 } else { 0 };
                             win += 1;
+                            g.reg(r!(seq_tiles_per_row), (x1 - wx).min(tw));
                             g.reg(r!(seq_tile_rows), (rows - wy).min(th) | mode << 12);
                             g.reg(r!(fb_origin), wx | wy << 16);
                             let t0 = std::time::Instant::now();
@@ -908,7 +927,7 @@ impl Prog {
                         }
                     }
                     g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
-                    i += 5;
+                    i += 9;
                 }
                 OCC_BEGIN => {
                     occ = 0;
