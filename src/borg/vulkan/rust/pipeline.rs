@@ -503,6 +503,17 @@ fn build_per_sample(
     Ok(sub[0])
 }
 
+/// With rasterizer discard the fragment stages' states are ignored, and without tessellation its
+/// state: their pointers may be anything.
+fn ignored_states_cleared(ci: &VkGraphicsPipelineCreateInfo) -> VkGraphicsPipelineCreateInfo {
+    let mut c = *ci;
+    if unsafe { c.pRasterizationState.as_ref() }.is_some_and(|r| r.rasterizerDiscardEnable != 0) {
+        (c.pViewportState, c.pMultisampleState, c.pDepthStencilState, c.pColorBlendState) = (null(), null(), null(), null());
+    }
+    c.pTessellationState = null();
+    c
+}
+
 fn mrt_formats(formats: &[VkFormat]) -> bool {
     formats.iter().all(|f| matches!(*f, VK_FORMAT_R8_UNORM | VK_FORMAT_R8_SNORM | VK_FORMAT_R8_UINT | VK_FORMAT_R8_SINT))
 }
@@ -512,6 +523,7 @@ entrypoint! {
         let mut sc = device.scratch.lock().unwrap();
         let mut result = Ok(());
         for (i, ci) in infos.iter().enumerate() {
+            let ci = &ignored_states_cleared(ci);
             let ri = unsafe { vk_get_pipeline_rendering_create_info(ci).as_ref() };
             let formats = ri.map_or(&[][..], |ri| unsafe { slice(ri.pColorAttachmentFormats, ri.colorAttachmentCount) });
             // The shared R8 targets have one value per pixel: multisampled ones draw in turn.
