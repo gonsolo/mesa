@@ -1851,7 +1851,7 @@ borg_lower_nir_for_borgc_hoist(struct nir_shader *nir, const struct borg_blend *
    if (nir->info.stage == MESA_SHADER_COMPUTE)
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_texel_buffer_filter,
                borg_texel_buffer_lower, NULL);
-   else if (nir->info.stage == MESA_SHADER_FRAGMENT)
+   else if (nir->info.stage == MESA_SHADER_FRAGMENT || nir->info.stage == MESA_SHADER_VERTEX)
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_frag_image_filter, borg_texel_buffer_lower, NULL);
    /* Push constants. Confirmed empirically (not assumed): with
     * push_const_addr_format left at its default, a `layout(push_constant)`
