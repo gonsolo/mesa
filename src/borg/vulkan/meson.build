@@ -109,6 +109,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'VkMemoryGetFdInfoKHR|VkMemoryFdPropertiesKHR|VkExportMemoryAllocateInfo|VkExternalMemoryFeatureFlagBits',
     '--allowlist-type', 'vk_physical_device|wsi_device|vk_instance|wsi_device_options|VkIcdSurfaceHeadless|VkSurfaceKHR|VkInstance',
     '--allowlist-function', 'vk_cmd_queue_execute|vk_sync_(wait|signal)',
+    '--allowlist-var', 'vk_sync_dummy_type',
     '--allowlist-type', 'vk_queue|vk_queue_submit|vk_cmd_queue_entry',
     '--allowlist-type', 'VkRenderPassBeginInfo|VkSubpassContents|VkSubpass(Begin|End)Info',
     '--allowlist-type', 'vk_buffer_view|VkComponentSwizzle|VkBufferCopy|VkCopyBufferInfo2|VkImageCopy|VkCopyImageInfo2|VkImageBlit|VkBlitImageInfo2|VkFilter',
