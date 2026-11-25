@@ -59,6 +59,8 @@ pub struct Pipeline {
     pub push_used: bool,     // a shader loads push constants
     pub emul_n: u8,          // wide colour targets: this and emul[] draw one each
     pub emul: [VkPipeline; 3],
+    pub sample_n: u8, // a fragment shader reading gl_SampleID: this and sample_pl[] draw one sample each
+    pub sample_pl: [VkPipeline; 3],
     pub push_window: bool,   // a stage reads push constants from the heap window
     pub spills: bool,        // a stage spills to the region's scratch slot
     pub push_stage: u8,      // bit per stage: loads push constants at the load base
@@ -459,6 +461,48 @@ fn build_emulated(
     Ok(sub[0])
 }
 
+/// A fragment shader that reads gl_SampleID: one pipeline per sample, with only that sample in its
+/// mask and gl_SampleID a constant, drawn one after the other.
+fn build_per_sample(
+    dev: &Device,
+    sc: &mut Scratch,
+    alloc: *const VkAllocationCallbacks,
+    ci: &VkGraphicsPipelineCreateInfo,
+) -> Result<VkPipeline, VkError> {
+    let ms = unsafe { &*ci.pMultisampleState };
+    let n = (ms.rasterizationSamples as usize).min(4);
+    let all = if ms.pSampleMask.is_null() { !0 } else { unsafe { *ms.pSampleMask } };
+    let mut sub: [VkPipeline; 4] = [null_mut(); 4];
+    let mut sub = Owned::new(&mut sub, |s| {
+        for p in s.iter().filter_map(|p| unsafe { p.get() }) {
+            destroy(dev, p, alloc);
+        }
+    });
+    let mut result = Ok(());
+    for k in 0..n {
+        let mask = all & 1 << k;
+        let mut mk = *ms;
+        mk.pSampleMask = &mask;
+        let mut ck = *ci;
+        ck.pMultisampleState = &mk;
+        sc.frag_sample = k as i32;
+        match build_graphics(dev, sc, alloc, &ck) {
+            Ok(p) => sub[k] = p,
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        }
+    }
+    sc.frag_sample = -1;
+    result?;
+    let sub = sub.keep();
+    let first = unsafe { sub[0].get() }.unwrap();
+    first.sample_n = n as u8;
+    first.sample_pl.copy_from_slice(&sub[1..]);
+    Ok(sub[0])
+}
+
 fn mrt_formats(formats: &[VkFormat]) -> bool {
     formats.iter().all(|f| matches!(*f, VK_FORMAT_R8_UNORM | VK_FORMAT_R8_SNORM | VK_FORMAT_R8_UINT | VK_FORMAT_R8_SINT))
 }
@@ -486,6 +530,11 @@ entrypoint! {
                     let r = build(&mut sc);
                     sc.frag_sample = -1;
                     r
+                }
+                // Multisampled: one pipeline per sample.
+                Ok(p) if ms && !emulate && sc.frag_reads_sample_id => {
+                    destroy(device, unsafe { p.get() }.unwrap(), alloc);
+                    build_per_sample(device, &mut sc, alloc, ci)
                 }
                 r => r,
             };
@@ -523,7 +572,7 @@ entrypoint! {
 
 /// Frees a pipeline and the pipelines of its other colour targets.
 fn destroy(dev: &Device, pl: &mut Pipeline, alloc: *const VkAllocationCallbacks) {
-    for p in pl.emul.into_iter().filter_map(|p| unsafe { p.get() }) {
+    for p in pl.emul.into_iter().chain(pl.sample_pl).filter_map(|p| unsafe { p.get() }) {
         destroy(dev, p, alloc);
     }
     unsafe { vk_object_free(dev.vk_ptr(), alloc, std::ptr::from_mut(pl).cast()) };
