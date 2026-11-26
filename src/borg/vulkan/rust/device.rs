@@ -49,6 +49,7 @@ pub struct Scratch {
     pub frag_select: u32, // 1 + the colour output the fragment shader keeps; 0 keeps all
     pub frag_sample: i32, // a per-sample pipeline's gl_SampleID; -1 otherwise
     pub frag_reads_sample_id: bool,
+    pub frag_a2c_discard: bool, // alpha to coverage at one sample, in the shader
     pub frag_reads_pntc: bool,
     pub frag_flat: u64,
     pub hoist: borg_hoist, // the fragment shader's per-draw work, for its vertex shader
@@ -80,6 +81,7 @@ impl Default for Scratch {
             frag_select: 0,
             frag_sample: -1,
             frag_reads_sample_id: false,
+            frag_a2c_discard: false,
             frag_reads_pntc: false,
             frag_flat: 0,
             hoist: borg_hoist { pre: std::ptr::null_mut(), first_slot: 0, slots: 0 },
