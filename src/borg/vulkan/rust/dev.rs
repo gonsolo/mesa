@@ -15,6 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
 const MAX_REGS: usize = 1024;
+const LINK_READS: usize = 56;
 const MAX_MEM: usize = 4096;
 
 enum Link {
@@ -194,15 +195,18 @@ impl Dev {
             }
             return;
         }
-        let mut q = Vec::with_capacity(9 * reads.len());
-        for (off, p) in reads.iter() {
-            q.push(b'm');
-            q.extend_from_slice(&off.to_le_bytes());
-            q.extend_from_slice(&(p.len() as u32).to_le_bytes());
-        }
-        self.put(&q);
-        for (_, p) in reads.iter_mut() {
-            self.get(p);
+        // The link holds 1 KB of commands while the board answers a read: more deadlock.
+        for batch in reads.chunks_mut(LINK_READS) {
+            let mut q = Vec::with_capacity(9 * batch.len());
+            for (off, p) in batch.iter() {
+                q.push(b'm');
+                q.extend_from_slice(&off.to_le_bytes());
+                q.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            }
+            self.put(&q);
+            for (_, p) in batch.iter_mut() {
+                self.get(p);
+            }
         }
     }
 }
