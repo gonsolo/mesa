@@ -544,6 +544,7 @@ impl Builder {
             st.push([r!(depth_cfg), self.st[5]]);
         }
         st.push([r!(cull_cfg), self.cull_cfg & 7]);
+        st.push([r!(sample_mask_cfg), self.sample_cfg()]);
         st.push([r!(depth_bias_const), bias_c]);
         st.push([r!(depth_bias_slope), bias_s]);
         match self.vp {
