@@ -186,7 +186,8 @@ pub fn format_properties(f: VkFormat) -> VkFormatProperties {
     if opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT != 0 && !ds && !bc {
         lin |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     }
-    let buf = if (opt != 0 || is_scaled(f)) && !ds && !bc { VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT | texel_buffer_features(f) } else { 0 };
+    let vb = if fmt::is_srgb(fmt::pipe(f)) { 0 } else { VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT };
+    let buf = if (opt != 0 || is_scaled(f)) && !ds && !bc { vb | texel_buffer_features(f) } else { 0 };
     VkFormatProperties { linearTilingFeatures: lin, optimalTilingFeatures: opt, bufferFeatures: buf }
 }
 
