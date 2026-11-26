@@ -298,16 +298,20 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     let (mrt, mrt_opt) = mrt(formats);
     let frag_opt = frag_options(formats, mrt, mrt_opt);
     // Alpha to coverage takes location 0's alpha even without a target that keeps it.
-    let a2c = unsafe { ci.pMultisampleState.as_ref() }.is_some_and(|ms| ms.alphaToCoverageEnable != 0);
+    let ms = unsafe { ci.pMultisampleState.as_ref() };
+    let a2c = ms.is_some_and(|ms| ms.alphaToCoverageEnable != 0);
     let frag_opt = if a2c && !mrt { frag_opt | BORGC_FS_ALPHA_OUTPUT } else { frag_opt };
+    // The hardware's alpha to coverage is part of 4x MSAA: at one sample the shader discards.
+    sc.frag_a2c_discard = a2c && ms.is_some_and(|ms| ms.rasterizationSamples == VK_SAMPLE_COUNT_1_BIT);
     let discard = rs.is_some_and(|r| r.rasterizerDiscardEnable != 0);
     let cb = if discard { None } else { unsafe { ci.pColorBlendState.as_ref() } };
     let blend = shader_blend(cb, formats.first().copied().unwrap_or(VK_FORMAT_UNDEFINED), mrt);
     sc.blend_lower = blend.as_ref().map_or(null(), |b| b);
     let stages = unsafe { slice(ci.pStages, ci.stageCount) };
-    let key = crate::stage_cache::key(sc, stages, &[vfetch, frag_opt, points as u32, lines as u32, sc.frag_sample as u32], pull.as_ref());
+    let key = crate::stage_cache::key(sc, stages, &[vfetch, frag_opt, points as u32, lines as u32, sc.frag_sample as u32, sc.frag_a2c_discard as u32], pull.as_ref());
     crate::stage_cache::compiled(sc, key, |sc| compile_stages(dev, sc, stages, vfetch, frag_opt, points));
     sc.blend_lower = null();
+    sc.frag_a2c_discard = false;
     unsafe { borg_lower_set_front_always(false) };
     unsafe { borg_lower_set_vertex_pull(null()) };
     sc.pull = false;

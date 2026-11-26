@@ -82,8 +82,8 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
     let (vs, fs) = (si.stage == VK_SHADER_STAGE_VERTEX_BIT, si.stage == VK_SHADER_STAGE_FRAGMENT_BIT);
     let slot = if vs { Some(VERT) } else if fs { Some(FRAG) } else { None };
     let blend = if fs { sc.blend_lower } else { null() };
-    // A per-sample variant is not the SPIR-V's blob: no cache.
-    if let Some(slot) = slot.filter(|_| blend.is_null() && !(fs && sc.frag_sample >= 0)) {
+    // A per-sample or discarding variant is not the SPIR-V's blob: no cache.
+    if let Some(slot) = slot.filter(|_| blend.is_null() && !(fs && (sc.frag_sample >= 0 || sc.frag_a2c_discard))) {
         if from_cache(sc, si, vfetch, slot) {
             return;
         }
@@ -102,6 +102,9 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
         sc.frag_reads_sample_id = unsafe { borg_lower_sample_id(nir, -1) };
         if sc.frag_sample >= 0 {
             unsafe { borg_lower_sample_id(nir, sc.frag_sample) };
+        }
+        if sc.frag_a2c_discard {
+            unsafe { borg_lower_a2c_discard(nir) };
         }
     }
     let lines = BORGC_VS_FETCH | BORGC_VS_POINT_QUADS | BORGC_VS_LINES_BIT;

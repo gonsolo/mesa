@@ -1386,6 +1386,24 @@ borg_lower_sample_id(struct nir_shader *nir, int sample)
    return false;
 }
 
+bool
+borg_lower_a2c_discard(struct nir_shader *nir)
+{
+   nir_variable *out = NULL;
+   nir_foreach_shader_out_variable(var, nir) {
+      if (var->data.location == FRAG_RESULT_DATA0 && glsl_type_is_vector(var->type) &&
+          glsl_get_vector_elements(var->type) == 4 && glsl_get_base_type(var->type) == GLSL_TYPE_FLOAT)
+         out = var;
+   }
+   if (!out)
+      return false;
+   NIR_PASS(_, nir, nir_lower_returns);
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   nir_terminate_if(&b, nir_flt_imm(&b, nir_channel(&b, nir_load_var(&b, out), 3), 0.5));
+   return nir_progress(true, impl, nir_metadata_none);
+}
+
 /* 16-bit storage: memory is accessed in words; a 16-bit store is an AND and an OR on its word. */
 static nir_mem_access_size_align
 borg_mem_size_align(nir_intrinsic_op intrin, uint8_t bytes, uint8_t bit_size, uint32_t align_mul,

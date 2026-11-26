@@ -45,6 +45,8 @@ void borg_lower_set_no_flatten(bool on);
 /* Whether a fragment shader reads gl_SampleID; at sample >= 0 it becomes that constant (one
  * pipeline per sample, each drawing its own sample). */
 bool borg_lower_sample_id(struct nir_shader *nir, int sample);
+/* Alpha to coverage at one sample: the sample is covered at alpha 0.5 and above. */
+bool borg_lower_a2c_discard(struct nir_shader *nir);
 void borg_lower_set_front_always(bool on);
 /* Vertex pulling (docs/B13_device_memory.md, 1.7): each attribute with a format is loaded at
  * index * stride + offset from binding 128 + binding of the draw's binding table and converted
