@@ -664,7 +664,7 @@ impl Ctx<'_> {
             }
             done |= 1 << b;
             if self.c.vb[b].is_null() {
-                return Err(Reject::VertexInput);
+                continue;
             }
             let (avail, gpu) = (self.c.vb_avail[b], self.c.vb_gpu[b]);
             if gpu == 0 {
@@ -684,6 +684,10 @@ impl Ctx<'_> {
         for at in &pl.attrs[..pl.attr_count as usize] {
             let b = at.binding as usize;
             let usable = at.location < 16 && b < VB;
+            // No buffer: the shader does not read the attribute (VUID-vkCmdDraw-None-04007).
+            if usable && self.c.vb[b].is_null() {
+                continue;
+            }
             let conv = usable && converts(at.format);
             let f = if !usable {
                 None
@@ -694,7 +698,7 @@ impl Ctx<'_> {
             } else {
                 vertex_fetch(at.format)
             };
-            let Some(f) = f.filter(|_| !self.c.vb[b].is_null()) else { return Err(Reject::VertexInput) };
+            let Some(f) = f else { return Err(Reject::VertexInput) };
             let rb = f.read_bytes as usize;
             let (stride, inst) = (pl.binding_stride[b] as u64, pl.binding_instance[b]);
             let avail = self.c.vb_avail[b];
