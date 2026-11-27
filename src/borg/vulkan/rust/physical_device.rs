@@ -350,7 +350,7 @@ fn properties() -> vk_properties {
     let mut p: vk_properties = unsafe { std::mem::zeroed() };
     p.apiVersion = API_VERSION;
     p.driverVersion = 1 << 12; // 0.1.0
-    p.vendorID = 0x1de0; // not a registered ID
+    p.vendorID = 0x10005; // VK_VENDOR_ID_MESA
     p.deviceID = 0xb049;
     p.deviceType = VK_PHYSICAL_DEVICE_TYPE_OTHER;
 
